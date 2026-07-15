@@ -13,20 +13,20 @@ const BOARD_PX: f32 = CELL * (BOARD as f32 - 1.0);
 const WIN_W: f32 = MARGIN * 2.0 + BOARD_PX;
 const WIN_H: f32 = TOP_BAR + MARGIN * 2.0 + BOARD_PX;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cell {
     Empty,
     Black,
     White,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
     HumanVsAi,
     HumanVsHuman,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
     Playing,
     Won(Cell),
@@ -86,7 +86,7 @@ impl Game {
         self.status = Status::Playing;
         self.win_line.clear();
         self.ai_thinking = false;
-        self.turn = if self.history.len() % 2 == 0 {
+        self.turn = if self.history.len().is_multiple_of(2) {
             Cell::Black
         } else {
             Cell::White
@@ -209,8 +209,7 @@ fn ai_move(board: &[[Cell; BOARD]; BOARD], ai: Cell, move_count: usize) -> (usiz
             let attack = point_score(board, x, y, ai);
             let defend = point_score(board, x, y, human);
             // 进攻优先, 防守略降权; 靠近中心微弱加分
-            let center_bias =
-                14 - ((x as i64 - 7).abs() + (y as i64 - 7).abs());
+            let center_bias = 14 - ((x as i64 - 7).abs() + (y as i64 - 7).abs());
             let score = attack * 10 + defend * 9 + center_bias;
             if score > best_score {
                 best_score = score;
@@ -253,7 +252,12 @@ fn draw_stone(x: usize, y: usize, c: Cell, highlight: bool) {
     match c {
         Cell::Black => {
             draw_circle(cx, cy, r, Color::from_rgba(20, 20, 20, 255));
-            draw_circle(cx - r * 0.3, cy - r * 0.3, r * 0.25, Color::from_rgba(90, 90, 90, 200));
+            draw_circle(
+                cx - r * 0.3,
+                cy - r * 0.3,
+                r * 0.25,
+                Color::from_rgba(90, 90, 90, 200),
+            );
         }
         Cell::White => {
             draw_circle(cx, cy, r, Color::from_rgba(240, 240, 240, 255));
@@ -274,7 +278,10 @@ struct Button {
 
 impl Button {
     fn new(x: f32, y: f32, w: f32, h: f32, label: &'static str) -> Self {
-        Self { rect: Rect::new(x, y, w, h), label }
+        Self {
+            rect: Rect::new(x, y, w, h),
+            label,
+        }
     }
 
     fn draw(&self) -> bool {
@@ -319,10 +326,16 @@ async fn main() {
 
         // ---- 顶栏
         draw_rectangle(0.0, 0.0, WIN_W, TOP_BAR, Color::from_rgba(30, 33, 40, 255));
-        let btn_mode = Button::new(12.0, 12.0, 150.0, 30.0, match game.mode {
-            Mode::HumanVsAi => "Mode: You vs AI",
-            Mode::HumanVsHuman => "Mode: 2 Players",
-        });
+        let btn_mode = Button::new(
+            12.0,
+            12.0,
+            150.0,
+            30.0,
+            match game.mode {
+                Mode::HumanVsAi => "Mode: You vs AI",
+                Mode::HumanVsHuman => "Mode: 2 Players",
+            },
+        );
         let btn_undo = Button::new(174.0, 12.0, 90.0, 30.0, "Undo (U)");
         let btn_restart = Button::new(276.0, 12.0, 110.0, 30.0, "Restart (R)");
 
@@ -349,7 +362,13 @@ async fn main() {
             },
             Status::Draw => "Draw! Press R".to_string(),
         };
-        draw_text(&status_text, 14.0, TOP_BAR - 12.0, 24.0, Color::from_rgba(255, 210, 120, 255));
+        draw_text(
+            &status_text,
+            14.0,
+            TOP_BAR - 12.0,
+            24.0,
+            Color::from_rgba(255, 210, 120, 255),
+        );
 
         // ---- 棋盘
         let (ox, oy) = board_origin();
@@ -362,8 +381,22 @@ async fn main() {
         );
         for i in 0..BOARD {
             let t = i as f32 * CELL;
-            draw_line(ox, oy + t, ox + BOARD_PX, oy + t, 1.2, Color::from_rgba(60, 40, 20, 255));
-            draw_line(ox + t, oy, ox + t, oy + BOARD_PX, 1.2, Color::from_rgba(60, 40, 20, 255));
+            draw_line(
+                ox,
+                oy + t,
+                ox + BOARD_PX,
+                oy + t,
+                1.2,
+                Color::from_rgba(60, 40, 20, 255),
+            );
+            draw_line(
+                ox + t,
+                oy,
+                ox + t,
+                oy + BOARD_PX,
+                1.2,
+                Color::from_rgba(60, 40, 20, 255),
+            );
         }
         for &(sx, sy) in &star_points {
             let (cx, cy) = cell_center(sx, sy);
@@ -382,7 +415,13 @@ async fn main() {
         // 胜利连线高亮
         for &(x, y) in &game.win_line {
             let (cx, cy) = cell_center(x, y);
-            draw_circle_lines(cx, cy, CELL * 0.46, 3.0, Color::from_rgba(60, 220, 100, 255));
+            draw_circle_lines(
+                cx,
+                cy,
+                CELL * 0.46,
+                3.0,
+                Color::from_rgba(60, 220, 100, 255),
+            );
         }
 
         // ---- 悬停预览
@@ -450,3 +489,7 @@ async fn main() {
         next_frame().await
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/unit_tests/mod.rs"]
+mod tests;
