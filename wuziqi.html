@@ -15,7 +15,7 @@
 // 模式: 人机对战 (默认, 玩家执黑) / 双人对战
 // 操作: 鼠标点击落子 | R 重开 | U 悔棋 | M 切换模式
 
-const BOARD=15, CELL=40, MARGIN=40, TOP_BAR=70;
+const BOARD=15, CENTER=Math.floor(BOARD/2), CELL=40, MARGIN=40, TOP_BAR=70;
 const BOARD_PX=CELL*(BOARD-1);
 const WIN_W=MARGIN*2+BOARD_PX, WIN_H=TOP_BAR+MARGIN*2+BOARD_PX;
 
@@ -41,9 +41,10 @@ function newGame(mode){
 let game=newGame(AI_MODE);
 
 const opponent=c=>c===BLACK?WHITE:c===WHITE?BLACK:EMPTY;
-const inBoard=(x,y)=>x>=0&&y>=0&&x<BOARD&&y<BOARD;
+const inBoard=(x,y)=>Number.isInteger(x)&&Number.isInteger(y)&&x>=0&&y>=0&&x<BOARD&&y<BOARD;
 
 function winningLine(board,x,y){
+  if(!inBoard(x,y)) return null;
   const p=board[y][x];
   if(p===EMPTY) return null;
   for(const [dx,dy] of [[1,0],[0,1],[1,1],[1,-1]]){
@@ -58,7 +59,7 @@ function winningLine(board,x,y){
 }
 
 function place(g,x,y){
-  if(g.status!=='playing'||g.board[y][x]!==EMPTY) return false;
+  if(!inBoard(x,y)||g.status!=='playing'||g.board[y][x]!==EMPTY) return false;
   g.board[y][x]=g.turn;
   g.history.push([x,y]);
   const line=winningLine(g.board,x,y);
@@ -69,8 +70,8 @@ function place(g,x,y){
 }
 
 function undo(g){
-  // 人机模式一律回退两步(AI + 玩家)
-  const steps=g.mode===AI_MODE?2:1;
+  // AI 已回应时回退两步；玩家刚落子而 AI 尚未回应时只回退一步
+  const steps=g.mode===AI_MODE&&g.history.length%2===0?2:1;
   for(let i=0;i<steps;i++){
     const mv=g.history.pop();
     if(mv) g.board[mv[1]][mv[0]]=EMPTY;
@@ -117,14 +118,14 @@ function nearStone(board,x,y){
   return false;
 }
 function aiMove(board,ai,moveCount){
-  if(moveCount===0) return [Math.floor(BOARD/2),Math.floor(BOARD/2)];
+  if(moveCount===0) return [CENTER,CENTER];
   const human=opponent(ai);
-  let best=[Math.floor(BOARD/2),Math.floor(BOARD/2)], bestScore=-Infinity;
+  let best=[CENTER,CENTER], bestScore=-Infinity;
   for(let y=0;y<BOARD;y++) for(let x=0;x<BOARD;x++){
     if(board[y][x]!==EMPTY||!nearStone(board,x,y)) continue;
     const attack=pointScore(board,x,y,ai);
     const defend=pointScore(board,x,y,human);
-    const centerBias=14-(Math.abs(x-7)+Math.abs(y-7));
+    const centerBias=BOARD-1-(Math.abs(x-CENTER)+Math.abs(y-CENTER));
     const score=attack*10+defend*9+centerBias;
     if(score>bestScore){ bestScore=score; best=[x,y]; }
   }
@@ -172,7 +173,7 @@ class Button{
   }
 }
 
-const starPoints=[[3,3],[3,11],[11,3],[11,11],[7,7]];
+const starPoints=[[3,3],[3,11],[11,3],[11,11],[CENTER,CENTER]];
 let keyR=false,keyU=false,keyM=false;
 
 function frame(){
@@ -270,7 +271,12 @@ cv.addEventListener('mousemove',e=>{
   const r=cv.getBoundingClientRect();
   mouseX=e.clientX-r.left; mouseY=e.clientY-r.top;
 });
-cv.addEventListener('mousedown',()=>{ mousePressed=true; });
+cv.addEventListener('mousedown',e=>{
+  if(e.button!==0) return;
+  const r=cv.getBoundingClientRect();
+  mouseX=e.clientX-r.left; mouseY=e.clientY-r.top;
+  mousePressed=true;
+});
 window.addEventListener('keydown',e=>{
   if(e.code==='KeyR') keyR=true;
   if(e.code==='KeyU') keyU=true;

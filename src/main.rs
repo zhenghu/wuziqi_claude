@@ -5,6 +5,7 @@
 use macroquad::prelude::*;
 
 const BOARD: usize = 15;
+const CENTER: usize = BOARD / 2;
 const CELL: f32 = 40.0;
 const MARGIN: f32 = 40.0;
 const TOP_BAR: f32 = 70.0;
@@ -57,7 +58,11 @@ impl Game {
     }
 
     fn place(&mut self, x: usize, y: usize) -> bool {
-        if self.status != Status::Playing || self.board[y][x] != Cell::Empty {
+        if self.status != Status::Playing
+            || x >= BOARD
+            || y >= BOARD
+            || self.board[y][x] != Cell::Empty
+        {
             return false;
         }
         self.board[y][x] = self.turn;
@@ -74,9 +79,12 @@ impl Game {
     }
 
     fn undo(&mut self) {
-        // 人机模式一律回退两步(AI + 玩家), 保证回到玩家可落子的局面;
-        // 即使 AI 刚获胜也能真正悔棋, 而不是被 AI 立刻原位再赢。
-        let steps = if self.mode == Mode::HumanVsAi { 2 } else { 1 };
+        // 人机模式下，AI 已回应时回退两步；玩家刚落子而 AI 尚未回应时只回退一步。
+        // 两种情况最终都回到玩家（黑棋）可落子的局面。
+        let steps = match self.mode {
+            Mode::HumanVsAi if self.history.len().is_multiple_of(2) => 2,
+            _ => 1,
+        };
         for _ in 0..steps {
             if let Some((x, y)) = self.history.pop() {
                 self.board[y][x] = Cell::Empty;
@@ -106,8 +114,11 @@ fn in_board(x: i32, y: i32) -> bool {
     x >= 0 && y >= 0 && (x as usize) < BOARD && (y as usize) < BOARD
 }
 
-/// 若 (x,y) 落子构成五连, 返回获胜的五个点
+/// 若 (x,y) 落子构成五连，返回首个获胜方向上的所有连续点
 fn winning_line(board: &[[Cell; BOARD]; BOARD], x: usize, y: usize) -> Option<Vec<(usize, usize)>> {
+    if x >= BOARD || y >= BOARD {
+        return None;
+    }
     let p = board[y][x];
     if p == Cell::Empty {
         return None;
@@ -196,10 +207,10 @@ fn near_stone(board: &[[Cell; BOARD]; BOARD], x: usize, y: usize) -> bool {
 fn ai_move(board: &[[Cell; BOARD]; BOARD], ai: Cell, move_count: usize) -> (usize, usize) {
     // 开局: 下中心或中心附近
     if move_count == 0 {
-        return (BOARD / 2, BOARD / 2);
+        return (CENTER, CENTER);
     }
     let human = opponent(ai);
-    let mut best = (BOARD / 2, BOARD / 2);
+    let mut best = (CENTER, CENTER);
     let mut best_score = i64::MIN;
     for y in 0..BOARD {
         for x in 0..BOARD {
@@ -209,7 +220,8 @@ fn ai_move(board: &[[Cell; BOARD]; BOARD], ai: Cell, move_count: usize) -> (usiz
             let attack = point_score(board, x, y, ai);
             let defend = point_score(board, x, y, human);
             // 进攻优先, 防守略降权; 靠近中心微弱加分
-            let center_bias = 14 - ((x as i64 - 7).abs() + (y as i64 - 7).abs());
+            let center_bias = (BOARD - 1) as i64
+                - ((x as i64 - CENTER as i64).abs() + (y as i64 - CENTER as i64).abs());
             let score = attack * 10 + defend * 9 + center_bias;
             if score > best_score {
                 best_score = score;
@@ -319,7 +331,7 @@ fn window_conf() -> Conf {
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut game = Game::new(Mode::HumanVsAi);
-    let star_points = [(3, 3), (3, 11), (11, 3), (11, 11), (7, 7)];
+    let star_points = [(3, 3), (3, 11), (11, 3), (11, 11), (CENTER, CENTER)];
 
     loop {
         clear_background(Color::from_rgba(40, 44, 52, 255));
