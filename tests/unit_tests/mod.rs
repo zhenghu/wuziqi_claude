@@ -163,6 +163,18 @@ fn ai_is_deterministic_and_returns_a_legal_move() {
 }
 
 #[test]
+fn llm_candidates_are_legal_and_preserve_forced_defense() {
+    let mut board = empty_board();
+    put(&mut board, &[(0, 7), (1, 7), (2, 7), (3, 7)], Cell::Black);
+
+    let candidates = llm_candidate_moves(&board, Cell::White, 4);
+    assert_eq!(candidates, vec![(4, 7)]);
+    assert!(candidates
+        .iter()
+        .all(|&(x, y)| x < BOARD && y < BOARD && board[y][x] == Cell::Empty));
+}
+
+#[test]
 fn immediate_winning_moves_finds_both_open_four_ends() {
     let mut board = empty_board();
     put(&mut board, &[(5, 7), (6, 7), (7, 7), (8, 7)], Cell::White);

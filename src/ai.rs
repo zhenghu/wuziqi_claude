@@ -309,3 +309,33 @@ pub(crate) fn ai_move(
     }
     best
 }
+
+/// 为大模型提供经过战术约束的候选点。必胜、必防和唯一双杀防守不会被普通限宽淘汰。
+pub(crate) fn llm_candidate_moves(
+    board: &[[Cell; BOARD]; BOARD],
+    ai: Cell,
+    move_count: usize,
+) -> Vec<(usize, usize)> {
+    if move_count == 0 {
+        return vec![(CENTER, CENTER)];
+    }
+    let human = opponent(ai);
+
+    let ai_wins = immediate_winning_moves(board, ai);
+    if !ai_wins.is_empty() {
+        return ranked_moves(board, ai, 0, &ai_wins);
+    }
+    let human_wins = immediate_winning_moves(board, human);
+    if !human_wins.is_empty() {
+        return ranked_moves(board, ai, 0, &human_wins);
+    }
+    let ai_forks = double_threat_moves(board, ai);
+    if !ai_forks.is_empty() {
+        return ranked_moves(board, ai, 0, &ai_forks);
+    }
+    let human_forks = double_threat_moves(board, human);
+    if human_forks.len() == 1 {
+        return human_forks;
+    }
+    ranked_moves(board, ai, ROOT_CANDIDATE_LIMIT, &human_forks)
+}

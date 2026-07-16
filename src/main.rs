@@ -3,13 +3,18 @@
 // 操作: 鼠标点击落子 | R 重开 | U 悔棋 | M 切换模式
 
 mod ai;
+mod config_ui;
+mod llm_ai;
 
-use ai::ai_move;
+use ai::{ai_move, llm_candidate_moves};
 #[cfg(test)]
 use ai::{
     double_threat_moves, immediate_winning_moves, line_stat, near_stone, pattern_score, point_score,
 };
+use config_ui::{ConfigAction, LlmConfigPage};
+use llm_ai::{request_move, LlmConfig};
 use macroquad::prelude::*;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 const BOARD: usize = 15;
 const CENTER: usize = BOARD / 2;
@@ -36,6 +41,12 @@ enum Mode {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AiAlgorithm {
+    TacticalSearch,
+    LargeModel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Status {
     Playing,
     Won(Cell),
@@ -50,6 +61,9 @@ struct Game {
     history: Vec<(usize, usize)>,
     win_line: Vec<(usize, usize)>,
     ai_thinking: bool,
+    ai_algorithm: AiAlgorithm,
+    pending_llm: Option<Receiver<Result<(usize, usize), String>>>,
+    ai_notice: String,
 }
 
 impl Game {
@@ -62,6 +76,9 @@ impl Game {
             history: Vec::new(),
             win_line: Vec::new(),
             ai_thinking: false,
+            ai_algorithm: AiAlgorithm::TacticalSearch,
+            pending_llm: None,
+            ai_notice: String::new(),
         }
     }
 
@@ -102,6 +119,8 @@ impl Game {
         self.status = Status::Playing;
         self.win_line.clear();
         self.ai_thinking = false;
+        self.pending_llm = None;
+        self.ai_notice.clear();
         self.turn = if self.history.len().is_multiple_of(2) {
             Cell::Black
         } else {
@@ -247,6 +266,9 @@ fn window_conf() -> Conf {
 #[macroquad::main(window_conf)]
 async fn main() {
     let mut game = Game::new(Mode::HumanVsAi);
+    let mut config_page = LlmConfigPage::new();
+    let mut active_llm_config = LlmConfig::from_env().ok();
+    let mut show_config = false;
     let star_points = [(3, 3), (3, 11), (11, 3), (11, 11), (CENTER, CENTER)];
 
     loop {
@@ -266,6 +288,17 @@ async fn main() {
         );
         let btn_undo = Button::new(174.0, 12.0, 90.0, 30.0, "Undo (U)");
         let btn_restart = Button::new(276.0, 12.0, 110.0, 30.0, "Restart (R)");
+        let btn_algorithm = Button::new(
+            398.0,
+            12.0,
+            130.0,
+            30.0,
+            match game.ai_algorithm {
+                AiAlgorithm::TacticalSearch => "AI: Tactical",
+                AiAlgorithm::LargeModel => "AI: LLM",
+            },
+        );
+        let btn_config = Button::new(540.0, 12.0, 83.0, 30.0, "Config (C)");
 
         let status_text = match game.status {
             Status::Playing => {
@@ -273,6 +306,9 @@ async fn main() {
                     "AI is thinking...".to_string()
                 } else {
                     match (game.mode, game.turn) {
+                        (Mode::HumanVsAi, Cell::Black) if !game.ai_notice.is_empty() => {
+                            format!("Your turn (Black) - {}", game.ai_notice)
+                        }
                         (Mode::HumanVsAi, Cell::Black) => "Your turn (Black)".to_string(),
                         (Mode::HumanVsAi, _) => "AI's turn (White)".to_string(),
                         (_, Cell::Black) => "Black's turn".to_string(),
@@ -373,6 +409,8 @@ async fn main() {
         let mut restart = is_key_pressed(KeyCode::R);
         let mut undo = is_key_pressed(KeyCode::U);
         let mut toggle_mode = is_key_pressed(KeyCode::M);
+        let mut toggle_algorithm = is_key_pressed(KeyCode::A);
+        let mut open_config = is_key_pressed(KeyCode::C);
         if btn_restart.draw() {
             restart = true;
         }
@@ -382,26 +420,132 @@ async fn main() {
         if btn_mode.draw() {
             toggle_mode = true;
         }
+        if btn_algorithm.draw() {
+            toggle_algorithm = true;
+        }
+        if btn_config.draw() {
+            open_config = true;
+        }
 
-        if toggle_mode {
+        if show_config {
+            match config_page.draw_and_update() {
+                ConfigAction::None => {}
+                ConfigAction::Cancel => show_config = false,
+                ConfigAction::Save(config) => {
+                    active_llm_config = Some(config);
+                    game.ai_algorithm = AiAlgorithm::LargeModel;
+                    game.ai_thinking = false;
+                    game.pending_llm = None;
+                    game.ai_notice = "LLM configuration saved".to_string();
+                    show_config = false;
+                }
+            }
+            next_frame().await;
+            continue;
+        }
+
+        if open_config {
+            config_page.open();
+            show_config = true;
+        } else if toggle_algorithm {
+            let next = match game.ai_algorithm {
+                AiAlgorithm::TacticalSearch => AiAlgorithm::LargeModel,
+                AiAlgorithm::LargeModel => AiAlgorithm::TacticalSearch,
+            };
+            if next == AiAlgorithm::LargeModel && active_llm_config.is_none() {
+                config_page.open();
+                show_config = true;
+            } else {
+                game.ai_algorithm = next;
+            }
+            game.ai_thinking = false;
+            game.pending_llm = None;
+            game.ai_notice.clear();
+        } else if toggle_mode {
+            let algorithm = game.ai_algorithm;
             let new_mode = match game.mode {
                 Mode::HumanVsAi => Mode::HumanVsHuman,
                 Mode::HumanVsHuman => Mode::HumanVsAi,
             };
             game = Game::new(new_mode);
+            game.ai_algorithm = algorithm;
         } else if restart {
+            let algorithm = game.ai_algorithm;
             game = Game::new(game.mode);
+            game.ai_algorithm = algorithm;
         } else if undo {
             game.undo();
         } else if game.status == Status::Playing {
             if game.mode == Mode::HumanVsAi && game.turn == Cell::White {
-                // 先渲染一帧 "AI thinking" 再计算
-                if game.ai_thinking {
-                    let (ax, ay) = ai_move(&game.board, Cell::White, game.history.len());
-                    game.place(ax, ay);
-                    game.ai_thinking = false;
-                } else {
-                    game.ai_thinking = true;
+                match game.ai_algorithm {
+                    AiAlgorithm::TacticalSearch => {
+                        // 先渲染一帧 "AI thinking" 再计算
+                        if game.ai_thinking {
+                            let (ax, ay) = ai_move(&game.board, Cell::White, game.history.len());
+                            game.place(ax, ay);
+                            game.ai_thinking = false;
+                        } else {
+                            game.ai_thinking = true;
+                            game.ai_notice.clear();
+                        }
+                    }
+                    AiAlgorithm::LargeModel => {
+                        if !game.ai_thinking {
+                            game.ai_thinking = true;
+                            game.ai_notice.clear();
+                            let board = game.board;
+                            let move_count = game.history.len();
+                            let candidates = llm_candidate_moves(&board, Cell::White, move_count);
+                            match active_llm_config.clone() {
+                                Some(config) => {
+                                    let model = config.model().to_string();
+                                    let (sender, receiver) = mpsc::channel();
+                                    std::thread::spawn(move || {
+                                        let result = request_move(&config, &board, &candidates);
+                                        let _ = sender.send(result);
+                                    });
+                                    game.pending_llm = Some(receiver);
+                                    eprintln!("正在请求大模型 {model} 选择落点……");
+                                }
+                                None => {
+                                    eprintln!("大模型未配置，使用战术搜索");
+                                    let (x, y) =
+                                        ai_move(&game.board, Cell::White, game.history.len());
+                                    game.place(x, y);
+                                    game.ai_thinking = false;
+                                    game.ai_notice =
+                                        "LLM not configured; used fallback".to_string();
+                                }
+                            }
+                        } else if let Some(receiver) = &game.pending_llm {
+                            match receiver.try_recv() {
+                                Ok(Ok((x, y))) => {
+                                    game.place(x, y);
+                                    game.ai_thinking = false;
+                                    game.pending_llm = None;
+                                    game.ai_notice = "LLM move".to_string();
+                                }
+                                Ok(Err(error)) => {
+                                    eprintln!("大模型落子失败，使用战术搜索: {error}");
+                                    let (x, y) =
+                                        ai_move(&game.board, Cell::White, game.history.len());
+                                    game.place(x, y);
+                                    game.ai_thinking = false;
+                                    game.pending_llm = None;
+                                    game.ai_notice = "LLM failed; used fallback".to_string();
+                                }
+                                Err(TryRecvError::Empty) => {}
+                                Err(TryRecvError::Disconnected) => {
+                                    let (x, y) =
+                                        ai_move(&game.board, Cell::White, game.history.len());
+                                    game.place(x, y);
+                                    game.ai_thinking = false;
+                                    game.pending_llm = None;
+                                    game.ai_notice = "LLM stopped; used fallback".to_string();
+                                }
+                            }
+                        }
+                    }
                 }
             } else if human_turn && is_mouse_button_pressed(MouseButton::Left) {
                 let (mx, my) = mouse_position();

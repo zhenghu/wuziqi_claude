@@ -1,0 +1,299 @@
+//! 大模型配置弹窗。配置只保存在当前进程内，API Key 不落盘。
+
+use crate::llm_ai::{LlmConfig, DEFAULT_API_URL, DEFAULT_MODEL};
+use macroquad::miniquad::window::clipboard_get;
+use macroquad::prelude::*;
+
+const PANEL_X: f32 = 70.0;
+const PANEL_Y: f32 = 105.0;
+const PANEL_W: f32 = 500.0;
+const PANEL_H: f32 = 490.0;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfigField {
+    ApiKey,
+    Model,
+    ApiUrl,
+}
+
+pub(crate) enum ConfigAction {
+    None,
+    Cancel,
+    Save(LlmConfig),
+}
+
+pub(crate) struct LlmConfigPage {
+    api_key: String,
+    model: String,
+    api_url: String,
+    active: ConfigField,
+    reveal_key: bool,
+    message: String,
+}
+
+impl LlmConfigPage {
+    pub(crate) fn new() -> Self {
+        Self {
+            api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+            model: std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string()),
+            api_url: std::env::var("OPENAI_API_URL")
+                .unwrap_or_else(|_| DEFAULT_API_URL.to_string()),
+            active: ConfigField::ApiKey,
+            reveal_key: false,
+            message: String::new(),
+        }
+    }
+
+    pub(crate) fn open(&mut self) {
+        self.active = ConfigField::ApiKey;
+        self.reveal_key = false;
+        self.message.clear();
+    }
+
+    fn active_value_mut(&mut self) -> &mut String {
+        match self.active {
+            ConfigField::ApiKey => &mut self.api_key,
+            ConfigField::Model => &mut self.model,
+            ConfigField::ApiUrl => &mut self.api_url,
+        }
+    }
+
+    fn next_field(&mut self) {
+        self.active = match self.active {
+            ConfigField::ApiKey => ConfigField::Model,
+            ConfigField::Model => ConfigField::ApiUrl,
+            ConfigField::ApiUrl => ConfigField::ApiKey,
+        };
+    }
+
+    fn handle_keyboard(&mut self) {
+        if is_key_pressed(KeyCode::Tab) {
+            self.next_field();
+        }
+        if is_key_pressed(KeyCode::Backspace) {
+            self.active_value_mut().pop();
+        }
+
+        let modifier = is_key_down(KeyCode::LeftControl)
+            || is_key_down(KeyCode::RightControl)
+            || is_key_down(KeyCode::LeftSuper)
+            || is_key_down(KeyCode::RightSuper);
+        let pasted = modifier && is_key_pressed(KeyCode::V);
+        if pasted {
+            if let Some(value) = clipboard_get() {
+                self.active_value_mut()
+                    .push_str(value.trim_matches(|c: char| c.is_whitespace()));
+            }
+        } else {
+            while let Some(character) = get_char_pressed() {
+                if !character.is_control() {
+                    self.active_value_mut().push(character);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn draw_and_update(&mut self) -> ConfigAction {
+        draw_rectangle(
+            0.0,
+            0.0,
+            screen_width(),
+            screen_height(),
+            Color::from_rgba(0, 0, 0, 190),
+        );
+        draw_rectangle(
+            PANEL_X,
+            PANEL_Y,
+            PANEL_W,
+            PANEL_H,
+            Color::from_rgba(38, 43, 53, 255),
+        );
+        draw_rectangle_lines(
+            PANEL_X,
+            PANEL_Y,
+            PANEL_W,
+            PANEL_H,
+            2.0,
+            Color::from_rgba(100, 135, 180, 255),
+        );
+
+        draw_text("Large Model Configuration", 100.0, 150.0, 28.0, WHITE);
+        draw_text(
+            "Settings stay in memory only and are cleared when the game exits.",
+            100.0,
+            178.0,
+            16.0,
+            Color::from_rgba(180, 190, 205, 255),
+        );
+
+        let key_rect = Rect::new(100.0, 220.0, 365.0, 38.0);
+        let show_rect = Rect::new(475.0, 220.0, 65.0, 38.0);
+        let model_rect = Rect::new(100.0, 305.0, 440.0, 38.0);
+        let url_rect = Rect::new(100.0, 390.0, 440.0, 38.0);
+        draw_text(
+            "API Key",
+            100.0,
+            212.0,
+            18.0,
+            Color::from_rgba(220, 225, 235, 255),
+        );
+        draw_text(
+            "Model",
+            100.0,
+            297.0,
+            18.0,
+            Color::from_rgba(220, 225, 235, 255),
+        );
+        draw_text(
+            "Responses API URL",
+            100.0,
+            382.0,
+            18.0,
+            Color::from_rgba(220, 225, 235, 255),
+        );
+
+        let key_display = if self.reveal_key {
+            self.api_key.clone()
+        } else {
+            "*".repeat(self.api_key.chars().count())
+        };
+        draw_field(key_rect, &key_display, self.active == ConfigField::ApiKey);
+        draw_field(model_rect, &self.model, self.active == ConfigField::Model);
+        draw_field(url_rect, &self.api_url, self.active == ConfigField::ApiUrl);
+
+        let (mx, my) = mouse_position();
+        let clicked = is_mouse_button_pressed(MouseButton::Left);
+        if clicked && key_rect.contains(vec2(mx, my)) {
+            self.active = ConfigField::ApiKey;
+        }
+        if clicked && model_rect.contains(vec2(mx, my)) {
+            self.active = ConfigField::Model;
+        }
+        if clicked && url_rect.contains(vec2(mx, my)) {
+            self.active = ConfigField::ApiUrl;
+        }
+        if draw_button(show_rect, if self.reveal_key { "Hide" } else { "Show" }) {
+            self.reveal_key = !self.reveal_key;
+        }
+
+        draw_text(
+            "Tip: use Cmd/Ctrl+V to paste. The key is never shown in logs.",
+            100.0,
+            458.0,
+            15.0,
+            Color::from_rgba(155, 170, 190, 255),
+        );
+        if !self.message.is_empty() {
+            draw_text(
+                &self.message,
+                100.0,
+                490.0,
+                16.0,
+                Color::from_rgba(255, 145, 120, 255),
+            );
+        }
+
+        self.handle_keyboard();
+        let cancel = draw_button(Rect::new(330.0, 525.0, 100.0, 40.0), "Cancel");
+        let save = draw_button(Rect::new(440.0, 525.0, 100.0, 40.0), "Save");
+        if cancel || is_key_pressed(KeyCode::Escape) {
+            return ConfigAction::Cancel;
+        }
+        if save || is_key_pressed(KeyCode::Enter) {
+            match LlmConfig::new(
+                self.api_key.clone(),
+                self.api_url.clone(),
+                self.model.clone(),
+            ) {
+                Ok(config) => return ConfigAction::Save(config),
+                Err(error) => self.message = error,
+            }
+        }
+        ConfigAction::None
+    }
+}
+
+fn visible_tail(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_string();
+    }
+    format!(
+        "...{}",
+        value
+            .chars()
+            .skip(count - max_chars + 3)
+            .collect::<String>()
+    )
+}
+
+fn draw_field(rect: Rect, value: &str, active: bool) {
+    draw_rectangle(
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        Color::from_rgba(25, 29, 36, 255),
+    );
+    draw_rectangle_lines(
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        if active { 2.0 } else { 1.0 },
+        if active {
+            Color::from_rgba(100, 165, 235, 255)
+        } else {
+            Color::from_rgba(90, 100, 115, 255)
+        },
+    );
+    let shown = visible_tail(value, 48);
+    draw_text(&shown, rect.x + 10.0, rect.y + 25.0, 18.0, WHITE);
+    if active && (get_time() * 2.0) as i64 % 2 == 0 {
+        let width = measure_text(&shown, None, 18, 1.0).width;
+        draw_line(
+            rect.x + 11.0 + width,
+            rect.y + 9.0,
+            rect.x + 11.0 + width,
+            rect.y + 29.0,
+            1.5,
+            WHITE,
+        );
+    }
+}
+
+fn draw_button(rect: Rect, label: &str) -> bool {
+    let (mx, my) = mouse_position();
+    let hover = rect.contains(vec2(mx, my));
+    draw_rectangle(
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        if hover {
+            Color::from_rgba(90, 130, 180, 255)
+        } else {
+            Color::from_rgba(70, 105, 150, 255)
+        },
+    );
+    let size = measure_text(label, None, 18, 1.0);
+    draw_text(
+        label,
+        rect.x + (rect.w - size.width) / 2.0,
+        rect.y + (rect.h + size.height) / 2.0 - 2.0,
+        18.0,
+        WHITE,
+    );
+    hover && is_mouse_button_pressed(MouseButton::Left)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visible_tail_keeps_short_values_and_truncates_long_ones() {
+        assert_eq!(visible_tail("short", 10), "short");
+        assert_eq!(visible_tail("abcdefghijkl", 8), "...hijkl");
+    }
+}
