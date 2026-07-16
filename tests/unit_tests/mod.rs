@@ -150,11 +150,82 @@ fn ai_prefers_its_own_win_over_blocking() {
 }
 
 #[test]
-fn ai_breaks_equal_scores_by_board_scan_order() {
+fn ai_is_deterministic_and_returns_a_legal_move() {
     let mut board = empty_board();
     board[7][7] = Cell::Black;
+    let before = board;
 
-    assert_eq!(ai_move(&board, Cell::White, 1), (7, 6));
+    let first = ai_move(&board, Cell::White, 1);
+    let second = ai_move(&board, Cell::White, 1);
+    assert_eq!(first, second);
+    assert_eq!(board[first.1][first.0], Cell::Empty);
+    assert_eq!(board, before);
+}
+
+#[test]
+fn immediate_winning_moves_finds_both_open_four_ends() {
+    let mut board = empty_board();
+    put(&mut board, &[(5, 7), (6, 7), (7, 7), (8, 7)], Cell::White);
+
+    assert_eq!(
+        immediate_winning_moves(&board, Cell::White),
+        vec![(4, 7), (9, 7)]
+    );
+}
+
+#[test]
+fn ai_creates_a_forced_win_with_a_double_threat() {
+    let mut board = empty_board();
+    put(
+        &mut board,
+        &[(4, 7), (5, 7), (8, 7), (7, 4), (7, 5), (7, 8)],
+        Cell::White,
+    );
+    put(
+        &mut board,
+        &[
+            (10, 10),
+            (11, 10),
+            (0, 0),
+            (14, 14),
+            (0, 14),
+            (14, 0),
+            (1, 12),
+        ],
+        Cell::Black,
+    );
+
+    assert_eq!(double_threat_moves(&board, Cell::White), vec![(7, 7)]);
+    let chosen = ai_move(&board, Cell::White, 13);
+    assert_eq!(chosen, (7, 7));
+
+    board[chosen.1][chosen.0] = Cell::White;
+    assert_eq!(
+        immediate_winning_moves(&board, Cell::White),
+        vec![(7, 6), (6, 7)]
+    );
+}
+
+#[test]
+fn ai_prevents_the_opponents_next_move_double_threat() {
+    let mut board = empty_board();
+    put(
+        &mut board,
+        &[(4, 7), (5, 7), (8, 7), (7, 4), (7, 5), (7, 8)],
+        Cell::Black,
+    );
+    put(
+        &mut board,
+        &[(10, 10), (11, 10), (0, 0), (14, 14), (0, 14)],
+        Cell::White,
+    );
+
+    assert_eq!(double_threat_moves(&board, Cell::Black), vec![(7, 7)]);
+    let chosen = ai_move(&board, Cell::White, 11);
+    assert!([(7, 7), (6, 7), (7, 6)].contains(&chosen));
+
+    board[chosen.1][chosen.0] = Cell::White;
+    assert!(double_threat_moves(&board, Cell::Black).is_empty());
 }
 
 #[test]
