@@ -1,6 +1,6 @@
 //! 五子棋的落点评分、战术识别与限宽搜索。
 
-use crate::{in_board, opponent, winning_line, Cell, BOARD, CENTER, DIRECTIONS};
+use crate::game::{in_board, opponent, winning_line, Cell, BOARD, CENTER, DIRECTIONS};
 
 const ROOT_CANDIDATE_LIMIT: usize = 12;
 const REPLY_CANDIDATE_LIMIT: usize = 10;

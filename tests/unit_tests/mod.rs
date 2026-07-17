@@ -1,4 +1,9 @@
-use super::*;
+use super::ai::{
+    ai_move, double_threat_moves, immediate_winning_moves, line_stat, llm_candidate_moves,
+    near_stone, pattern_score, point_score,
+};
+use super::app::compact_text;
+use super::game::{opponent, winning_line, Cell, Game, Mode, Status, BOARD, CENTER};
 
 type Board = [[Cell; BOARD]; BOARD];
 
@@ -35,6 +40,15 @@ fn opponent_swaps_colors_and_keeps_empty() {
     assert_eq!(opponent(Cell::Black), Cell::White);
     assert_eq!(opponent(Cell::White), Cell::Black);
     assert_eq!(opponent(Cell::Empty), Cell::Empty);
+}
+
+#[test]
+fn compact_text_preserves_short_model_ids_and_truncates_long_ones() {
+    assert_eq!(compact_text("openai/gpt-5-mini", 24), "openai/gpt-5-mini");
+    assert_eq!(
+        compact_text("provider/a-very-long-model-name", 16),
+        "provider/a-ve..."
+    );
 }
 
 #[test]
@@ -285,26 +299,22 @@ fn place_transitions_to_won_and_rejects_later_moves() {
 #[test]
 fn undo_restores_invariants_in_both_modes() {
     let mut pvp = play_black_horizontal_win(Mode::HumanVsHuman);
-    pvp.ai_thinking = true;
     pvp.undo();
     assert_eq!(pvp.status, Status::Playing);
     assert_eq!(pvp.turn, Cell::Black);
     assert_eq!(pvp.history.len(), 8);
     assert_eq!(pvp.board[7][7], Cell::Empty);
     assert!(pvp.win_line.is_empty());
-    assert!(!pvp.ai_thinking);
 
     let mut versus_ai = Game::new(Mode::HumanVsAi);
     assert!(versus_ai.place(7, 7));
     assert!(versus_ai.place(7, 8));
-    versus_ai.ai_thinking = true;
     versus_ai.undo();
     assert!(versus_ai.history.is_empty());
     assert_eq!(versus_ai.board[7][7], Cell::Empty);
     assert_eq!(versus_ai.board[8][7], Cell::Empty);
     assert_eq!(versus_ai.turn, Cell::Black);
     assert_eq!(versus_ai.status, Status::Playing);
-    assert!(!versus_ai.ai_thinking);
 }
 
 #[test]
@@ -313,8 +323,6 @@ fn undo_before_ai_reply_only_removes_the_latest_human_move() {
     assert!(game.place(7, 7));
     assert!(game.place(7, 8));
     assert!(game.place(8, 7));
-    game.ai_thinking = true;
-
     game.undo();
 
     assert_eq!(game.history, vec![(7, 7), (7, 8)]);
@@ -324,7 +332,6 @@ fn undo_before_ai_reply_only_removes_the_latest_human_move() {
     assert_eq!(game.turn, Cell::Black);
     assert_eq!(game.status, Status::Playing);
     assert!(game.win_line.is_empty());
-    assert!(!game.ai_thinking);
 }
 
 #[test]

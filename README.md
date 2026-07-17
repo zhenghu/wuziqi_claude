@@ -11,6 +11,8 @@
 - `A` 切换 经典战术搜索 / 大模型 AI（原生版）
 - `C` 打开大模型配置页面（原生版）
 
+人机模式下，棋盘底部会持续显示当前 AI 引擎；OpenRouter 首次成功返回后，显示响应中的实际模型 ID，以及响应提供的供应商信息。
+
 ## 运行
 
 ### 原生版 (Rust)
@@ -55,7 +57,10 @@ cargo run --release
 ```
 ├── Cargo.toml              # Rust 项目配置 (依赖: macroquad 0.4)
 ├── src/
-│   ├── main.rs             # 游戏状态、输入与渲染
+│   ├── main.rs             # 程序入口
+│   ├── app.rs              # 主循环、输入调度与 AI 请求状态
+│   ├── game.rs             # 棋局状态与规则
+│   ├── board_view.rs       # 棋盘绘制与坐标换算
 │   ├── ai.rs               # Rust 版 AI 搜索
 │   ├── config_ui.rs        # 大模型配置页面
 │   └── llm_ai.rs           # 大模型 API、提示词、结果校验
