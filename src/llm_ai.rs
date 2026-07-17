@@ -1,6 +1,6 @@
 //! 通过 OpenRouter Chat Completions API 从战术引擎筛选出的合法点中选择落子。
 
-use crate::{Cell, BOARD};
+use crate::game::{Cell, BOARD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs::OpenOptions;

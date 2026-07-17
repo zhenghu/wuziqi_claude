@@ -57,7 +57,10 @@ cargo run --release
 ```
 ├── Cargo.toml              # Rust 项目配置 (依赖: macroquad 0.4)
 ├── src/
-│   ├── main.rs             # 游戏状态、输入与渲染
+│   ├── main.rs             # 程序入口
+│   ├── app.rs              # 主循环、输入调度与 AI 请求状态
+│   ├── game.rs             # 棋局状态与规则
+│   ├── board_view.rs       # 棋盘绘制与坐标换算
 │   ├── ai.rs               # Rust 版 AI 搜索
 │   ├── config_ui.rs        # 大模型配置页面
 │   └── llm_ai.rs           # 大模型 API、提示词、结果校验
