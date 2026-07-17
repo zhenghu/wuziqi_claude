@@ -12,7 +12,7 @@ use ai::{
     double_threat_moves, immediate_winning_moves, line_stat, near_stone, pattern_score, point_score,
 };
 use config_ui::{ConfigAction, LlmConfigPage};
-use llm_ai::{request_move, LlmConfig};
+use llm_ai::{request_move, LlmConfig, CONFIG_PATH};
 use macroquad::prelude::*;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
@@ -267,7 +267,18 @@ fn window_conf() -> Conf {
 async fn main() {
     let mut game = Game::new(Mode::HumanVsAi);
     let mut config_page = LlmConfigPage::new();
-    let mut active_llm_config = LlmConfig::from_env().ok();
+    let mut active_llm_config = match LlmConfig::load() {
+        Ok(config) => Some(config),
+        Err(error) => {
+            if std::path::Path::new(CONFIG_PATH).exists() {
+                eprintln!("OpenRouter 配置加载失败: {error}");
+            }
+            None
+        }
+    };
+    if active_llm_config.is_some() {
+        game.ai_algorithm = AiAlgorithm::LargeModel;
+    }
     let mut show_config = false;
     let star_points = [(3, 3), (3, 11), (11, 3), (11, 11), (CENTER, CENTER)];
 
@@ -295,7 +306,7 @@ async fn main() {
             30.0,
             match game.ai_algorithm {
                 AiAlgorithm::TacticalSearch => "AI: Tactical",
-                AiAlgorithm::LargeModel => "AI: LLM",
+                AiAlgorithm::LargeModel => "AI: Router",
             },
         );
         let btn_config = Button::new(540.0, 12.0, 83.0, 30.0, "Config (C)");
@@ -436,7 +447,7 @@ async fn main() {
                     game.ai_algorithm = AiAlgorithm::LargeModel;
                     game.ai_thinking = false;
                     game.pending_llm = None;
-                    game.ai_notice = "LLM configuration saved".to_string();
+                    game.ai_notice = "OpenRouter config saved".to_string();
                     show_config = false;
                 }
             }

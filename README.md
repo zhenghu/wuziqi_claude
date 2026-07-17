@@ -21,18 +21,24 @@ cargo run --release
 
 ### 大模型 AI（原生版）
 
-大模型模式使用 OpenAI Responses API。点击顶部 `Config (C)` 或按 `C` 打开配置页面，可填写 API Key、模型名称和 API 地址；设置仅保存在当前游戏进程内，退出后清除。也可以在启动前通过环境变量提供默认值：
+大模型模式使用 OpenRouter Chat Completions API。点击顶部 `Config (C)` 或按 `C` 打开配置页面，可填写 OpenRouter API Key、模型名称和 API 地址。保存后配置会写入项目目录下的 `llm_config.json`，并在 macOS/Linux 上设置为仅当前用户可读写。
+
+也可以复制示例文件后直接编辑 JSON：
 
 ```bash
-export OPENAI_API_KEY="你的 API Key"
-# 可选，默认 gpt-5-mini
-export OPENAI_MODEL="gpt-5-mini"
-# 可选，默认 https://api.openai.com/v1/responses
-export OPENAI_API_URL="https://api.openai.com/v1/responses"
+cp llm_config.example.json llm_config.json
 cargo run --release
 ```
 
-配置页面支持 API Key 脱敏显示、显示/隐藏、`Cmd/Ctrl+V` 粘贴和保存前校验。保存后自动切换到大模型 AI。模型从本地战术引擎筛选出的合法候选点中选择最佳落点；请求超时、服务报错或模型返回非法坐标时，会自动降级到经典搜索。静态网页版不会读取 API Key，以免密钥暴露在浏览器中。
+```json
+{
+  "api_key": "YOUR_OPENROUTER_API_KEY",
+  "api_url": "https://openrouter.ai/api/v1/chat/completions",
+  "model": "openai/gpt-5-mini"
+}
+```
+
+`llm_config.json` 已加入 `.gitignore`，不会被 Git 提交；仓库中的 `llm_config.example.json` 不包含真实密钥。配置页面支持 API Key 脱敏显示、显示/隐藏、`Paste` 按钮、`Cmd/Ctrl+V` 粘贴和保存前校验。保存后自动切换到 OpenRouter AI。请求超时、服务报错或模型返回非法坐标时，会自动降级到经典搜索。
 
 没装 Rust 的话,macOS 下直接双击 `run_wuziqi.command`,脚本会自动通过 [rustup](https://rustup.rs) 安装工具链并编译运行。
 
@@ -53,6 +59,7 @@ cargo run --release
 │   ├── ai.rs               # Rust 版 AI 搜索
 │   ├── config_ui.rs        # 大模型配置页面
 │   └── llm_ai.rs           # 大模型 API、提示词、结果校验
+├── llm_config.example.json # OpenRouter 配置示例（不含真实 Key）
 ├── ai.js                   # 网页版 AI 搜索
 ├── wuziqi.html             # 网页版游戏界面与交互
 ├── tests/unit_tests/mod.rs # Rust 单元测试
