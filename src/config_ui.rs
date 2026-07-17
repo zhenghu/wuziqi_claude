@@ -1,8 +1,10 @@
-//! 大模型配置弹窗。配置只保存在当前进程内，API Key 不落盘。
+//! OpenRouter 配置弹窗。配置保存为被 Git 忽略的 JSON 文件。
 
-use crate::llm_ai::{LlmConfig, DEFAULT_API_URL, DEFAULT_MODEL};
+use crate::llm_ai::{LlmConfig, CONFIG_PATH, DEFAULT_API_URL, DEFAULT_MODEL};
 use macroquad::miniquad::window::clipboard_get;
 use macroquad::prelude::*;
+#[cfg(target_os = "macos")]
+use std::process::Command;
 
 const PANEL_X: f32 = 70.0;
 const PANEL_Y: f32 = 105.0;
@@ -29,18 +31,28 @@ pub(crate) struct LlmConfigPage {
     active: ConfigField,
     reveal_key: bool,
     message: String,
+    suppress_paste_chars: bool,
 }
 
 impl LlmConfigPage {
     pub(crate) fn new() -> Self {
+        let saved = LlmConfig::load().ok();
         Self {
-            api_key: std::env::var("OPENAI_API_KEY").unwrap_or_default(),
-            model: std::env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string()),
-            api_url: std::env::var("OPENAI_API_URL")
-                .unwrap_or_else(|_| DEFAULT_API_URL.to_string()),
+            api_key: saved
+                .as_ref()
+                .map_or_else(String::new, |config| config.api_key().to_string()),
+            model: saved.as_ref().map_or_else(
+                || DEFAULT_MODEL.to_string(),
+                |config| config.model().to_string(),
+            ),
+            api_url: saved.as_ref().map_or_else(
+                || DEFAULT_API_URL.to_string(),
+                |config| config.api_url().to_string(),
+            ),
             active: ConfigField::ApiKey,
             reveal_key: false,
             message: String::new(),
+            suppress_paste_chars: false,
         }
     }
 
@@ -66,7 +78,34 @@ impl LlmConfigPage {
         };
     }
 
+    fn paste_active(&mut self) {
+        let Some(value) = read_clipboard_text() else {
+            self.message = "Clipboard is empty or unavailable".to_string();
+            return;
+        };
+        self.apply_pasted_value(&value);
+    }
+
+    fn apply_pasted_value(&mut self, value: &str) {
+        let value = value.trim_matches(|c: char| c.is_whitespace());
+        if value.is_empty() {
+            self.message = "Clipboard is empty or unavailable".to_string();
+            return;
+        }
+        *self.active_value_mut() = value.to_string();
+        self.message.clear();
+    }
+
     fn handle_keyboard(&mut self) {
+        // macOS 可能在 Cmd+V 后继续投递字符 'v'；在 V 释放前丢弃这批字符事件。
+        if self.suppress_paste_chars {
+            while get_char_pressed().is_some() {}
+            if is_key_down(KeyCode::V) {
+                return;
+            }
+            self.suppress_paste_chars = false;
+        }
+
         if is_key_pressed(KeyCode::Tab) {
             self.next_field();
         }
@@ -80,10 +119,9 @@ impl LlmConfigPage {
             || is_key_down(KeyCode::RightSuper);
         let pasted = modifier && is_key_pressed(KeyCode::V);
         if pasted {
-            if let Some(value) = clipboard_get() {
-                self.active_value_mut()
-                    .push_str(value.trim_matches(|c: char| c.is_whitespace()));
-            }
+            self.paste_active();
+            self.suppress_paste_chars = true;
+            while get_char_pressed().is_some() {}
         } else {
             while let Some(character) = get_char_pressed() {
                 if !character.is_control() {
@@ -117,21 +155,23 @@ impl LlmConfigPage {
             Color::from_rgba(100, 135, 180, 255),
         );
 
-        draw_text("Large Model Configuration", 100.0, 150.0, 28.0, WHITE);
+        draw_text("OpenRouter Configuration", 100.0, 150.0, 28.0, WHITE);
+        let storage_note = format!("Saved to {CONFIG_PATH} (local only, ignored by Git).");
         draw_text(
-            "Settings stay in memory only and are cleared when the game exits.",
+            &storage_note,
             100.0,
             178.0,
             16.0,
             Color::from_rgba(180, 190, 205, 255),
         );
 
-        let key_rect = Rect::new(100.0, 220.0, 365.0, 38.0);
-        let show_rect = Rect::new(475.0, 220.0, 65.0, 38.0);
+        let key_rect = Rect::new(100.0, 220.0, 295.0, 38.0);
+        let paste_rect = Rect::new(405.0, 220.0, 65.0, 38.0);
+        let show_rect = Rect::new(480.0, 220.0, 60.0, 38.0);
         let model_rect = Rect::new(100.0, 305.0, 440.0, 38.0);
         let url_rect = Rect::new(100.0, 390.0, 440.0, 38.0);
         draw_text(
-            "API Key",
+            "OpenRouter API Key",
             100.0,
             212.0,
             18.0,
@@ -145,7 +185,7 @@ impl LlmConfigPage {
             Color::from_rgba(220, 225, 235, 255),
         );
         draw_text(
-            "Responses API URL",
+            "Chat Completions API URL",
             100.0,
             382.0,
             18.0,
@@ -172,12 +212,16 @@ impl LlmConfigPage {
         if clicked && url_rect.contains(vec2(mx, my)) {
             self.active = ConfigField::ApiUrl;
         }
+        if draw_button(paste_rect, "Paste") {
+            self.active = ConfigField::ApiKey;
+            self.paste_active();
+        }
         if draw_button(show_rect, if self.reveal_key { "Hide" } else { "Show" }) {
             self.reveal_key = !self.reveal_key;
         }
 
         draw_text(
-            "Tip: use Cmd/Ctrl+V to paste. The key is never shown in logs.",
+            "Use Paste or Cmd/Ctrl+V. The key is never shown in logs.",
             100.0,
             458.0,
             15.0,
@@ -205,12 +249,31 @@ impl LlmConfigPage {
                 self.api_url.clone(),
                 self.model.clone(),
             ) {
-                Ok(config) => return ConfigAction::Save(config),
+                Ok(config) => match config.save() {
+                    Ok(()) => return ConfigAction::Save(config),
+                    Err(error) => self.message = error,
+                },
                 Err(error) => self.message = error,
             }
         }
         ConfigAction::None
     }
+}
+
+fn read_clipboard_text() -> Option<String> {
+    if let Some(value) = clipboard_get() {
+        return Some(value);
+    }
+
+    // miniquad 0.4.10 的 macOS 通用 Clipboard 实现固定返回 None，使用系统命令回退。
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("pbpaste").output().ok()?;
+        if output.status.success() {
+            return String::from_utf8(output.stdout).ok();
+        }
+    }
+    None
 }
 
 fn visible_tail(value: &str, max_chars: usize) -> String {
@@ -295,5 +358,17 @@ mod tests {
     fn visible_tail_keeps_short_values_and_truncates_long_ones() {
         assert_eq!(visible_tail("short", 10), "short");
         assert_eq!(visible_tail("abcdefghijkl", 8), "...hijkl");
+    }
+
+    #[test]
+    fn pasting_an_api_key_replaces_the_previous_value() {
+        let mut page = LlmConfigPage::new();
+        page.active = ConfigField::ApiKey;
+        page.api_key = "old-key".to_string();
+
+        page.apply_pasted_value("  new-key\n");
+
+        assert_eq!(page.api_key, "new-key");
+        assert!(page.message.is_empty());
     }
 }
