@@ -38,6 +38,15 @@ fn opponent_swaps_colors_and_keeps_empty() {
 }
 
 #[test]
+fn compact_text_preserves_short_model_ids_and_truncates_long_ones() {
+    assert_eq!(compact_text("openai/gpt-5-mini", 24), "openai/gpt-5-mini");
+    assert_eq!(
+        compact_text("provider/a-very-long-model-name", 16),
+        "provider/a-ve..."
+    );
+}
+
+#[test]
 fn winning_line_detects_all_four_axes() {
     for (dx, dy) in [(1, 0), (0, 1), (1, 1), (1, -1)] {
         let mut board = empty_board();

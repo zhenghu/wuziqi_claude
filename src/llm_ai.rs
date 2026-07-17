@@ -20,6 +20,21 @@ pub(crate) struct LlmConfig {
     model: String,
 }
 
+pub(crate) struct LlmMove {
+    pub(crate) position: (usize, usize),
+    model: String,
+    provider: Option<String>,
+}
+
+impl LlmMove {
+    pub(crate) fn route_label(&self) -> String {
+        match self.provider.as_deref() {
+            Some(provider) if !provider.is_empty() => format!("{} via {provider}", self.model),
+            _ => self.model.clone(),
+        }
+    }
+}
+
 impl LlmConfig {
     pub(crate) fn new(api_key: String, api_url: String, model: String) -> Result<Self, String> {
         let api_key = api_key.trim().to_string();
@@ -187,7 +202,7 @@ pub(crate) fn request_move(
     config: &LlmConfig,
     board: &[[Cell; BOARD]; BOARD],
     candidates: &[(usize, usize)],
-) -> Result<(usize, usize), String> {
+) -> Result<LlmMove, String> {
     if candidates.is_empty() {
         return Err("没有合法候选点".to_string());
     }
@@ -262,7 +277,22 @@ pub(crate) fn request_move(
     if !candidates.contains(&chosen) {
         return Err(format!("模型返回了候选集外的落点: {chosen:?}"));
     }
-    Ok(chosen)
+    let model = value
+        .get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| "OpenRouter response is missing the routed model".to_string())?
+        .to_string();
+    let provider = value
+        .get("provider")
+        .and_then(Value::as_str)
+        .filter(|provider| !provider.is_empty())
+        .map(str::to_string);
+    Ok(LlmMove {
+        position: chosen,
+        model,
+        provider,
+    })
 }
 
 #[cfg(test)]
@@ -283,6 +313,19 @@ mod tests {
             "choices": [{"message": {"role": "assistant", "content": "{\"x\":1,\"y\":2}"}}]
         });
         assert_eq!(response_text(&value).as_deref(), Some("{\"x\":1,\"y\":2}"));
+    }
+
+    #[test]
+    fn labels_the_route_reported_by_openrouter() {
+        let routed_move = LlmMove {
+            position: (1, 2),
+            model: "anthropic/claude-sonnet-4".to_string(),
+            provider: Some("Anthropic".to_string()),
+        };
+        assert_eq!(
+            routed_move.route_label(),
+            "anthropic/claude-sonnet-4 via Anthropic"
+        );
     }
 
     #[test]

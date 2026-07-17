@@ -12,7 +12,7 @@ use ai::{
     double_threat_moves, immediate_winning_moves, line_stat, near_stone, pattern_score, point_score,
 };
 use config_ui::{ConfigAction, LlmConfigPage};
-use llm_ai::{request_move, LlmConfig, CONFIG_PATH};
+use llm_ai::{request_move, LlmConfig, LlmMove, CONFIG_PATH};
 use macroquad::prelude::*;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 
@@ -62,7 +62,7 @@ struct Game {
     win_line: Vec<(usize, usize)>,
     ai_thinking: bool,
     ai_algorithm: AiAlgorithm,
-    pending_llm: Option<Receiver<Result<(usize, usize), String>>>,
+    pending_llm: Option<Receiver<Result<LlmMove, String>>>,
     ai_notice: String,
 }
 
@@ -193,6 +193,15 @@ fn pixel_to_cell(mx: f32, my: f32) -> Option<(usize, usize)> {
     Some((rx as usize, ry as usize))
 }
 
+fn compact_text(value: &str, max_chars: usize) -> String {
+    let count = value.chars().count();
+    if count <= max_chars {
+        return value.to_string();
+    }
+    let keep = max_chars.saturating_sub(3);
+    format!("{}...", value.chars().take(keep).collect::<String>())
+}
+
 fn draw_stone(x: usize, y: usize, c: Cell, highlight: bool) {
     let (cx, cy) = cell_center(x, y);
     let r = CELL * 0.42;
@@ -279,6 +288,11 @@ async fn main() {
     if active_llm_config.is_some() {
         game.ai_algorithm = AiAlgorithm::LargeModel;
     }
+    let mut openrouter_status = if active_llm_config.is_some() {
+        "OpenRouter: not connected".to_string()
+    } else {
+        "OpenRouter: not configured".to_string()
+    };
     let mut show_config = false;
     let star_points = [(3, 3), (3, 11), (11, 3), (11, 11), (CENTER, CENTER)];
 
@@ -310,6 +324,11 @@ async fn main() {
             },
         );
         let btn_config = Button::new(540.0, 12.0, 83.0, 30.0, "Config (C)");
+
+        let ai_model_label = match game.ai_algorithm {
+            AiAlgorithm::TacticalSearch => "Tactical Search".to_string(),
+            AiAlgorithm::LargeModel => compact_text(&openrouter_status, 38),
+        };
 
         let status_text = match game.status {
             Status::Playing => {
@@ -344,6 +363,25 @@ async fn main() {
             24.0,
             Color::from_rgba(255, 210, 120, 255),
         );
+        if game.mode == Mode::HumanVsAi {
+            let badge_text = format!("AI: {ai_model_label}");
+            let badge_size = measure_text(&badge_text, None, 16, 1.0);
+            let badge_x = WIN_W - badge_size.width - 18.0;
+            draw_rectangle(
+                badge_x - 6.0,
+                TOP_BAR - 28.0,
+                badge_size.width + 12.0,
+                23.0,
+                Color::from_rgba(45, 75, 110, 245),
+            );
+            draw_text(
+                &badge_text,
+                badge_x,
+                TOP_BAR - 11.0,
+                16.0,
+                Color::from_rgba(215, 230, 250, 255),
+            );
+        }
 
         // ---- 棋盘
         let (ox, oy) = board_origin();
@@ -399,6 +437,21 @@ async fn main() {
             );
         }
 
+        // ---- 当前 AI 引擎 / 模型
+        if game.mode == Mode::HumanVsAi {
+            let ai_info = match game.ai_algorithm {
+                AiAlgorithm::TacticalSearch => "AI engine: Tactical Search".to_string(),
+                AiAlgorithm::LargeModel => format!("AI route: {ai_model_label}"),
+            };
+            draw_text(
+                &ai_info,
+                22.0,
+                WIN_H - 5.0,
+                16.0,
+                Color::from_rgba(190, 205, 225, 255),
+            );
+        }
+
         // ---- 悬停预览
         let human_turn = game.status == Status::Playing
             && !(game.mode == Mode::HumanVsAi && game.turn == Cell::White);
@@ -444,6 +497,7 @@ async fn main() {
                 ConfigAction::Cancel => show_config = false,
                 ConfigAction::Save(config) => {
                     active_llm_config = Some(config);
+                    openrouter_status = "OpenRouter: not connected".to_string();
                     game.ai_algorithm = AiAlgorithm::LargeModel;
                     game.ai_thinking = false;
                     game.pending_llm = None;
@@ -510,6 +564,7 @@ async fn main() {
                             match active_llm_config.clone() {
                                 Some(config) => {
                                     let model = config.model().to_string();
+                                    openrouter_status = "OpenRouter: connecting...".to_string();
                                     let (sender, receiver) = mpsc::channel();
                                     std::thread::spawn(move || {
                                         let result = request_move(&config, &board, &candidates);
@@ -530,13 +585,16 @@ async fn main() {
                             }
                         } else if let Some(receiver) = &game.pending_llm {
                             match receiver.try_recv() {
-                                Ok(Ok((x, y))) => {
+                                Ok(Ok(llm_move)) => {
+                                    let (x, y) = llm_move.position;
+                                    openrouter_status = llm_move.route_label();
                                     game.place(x, y);
                                     game.ai_thinking = false;
                                     game.pending_llm = None;
                                     game.ai_notice = "LLM move".to_string();
                                 }
                                 Ok(Err(error)) => {
+                                    openrouter_status = "OpenRouter: call failed".to_string();
                                     eprintln!("大模型落子失败，使用战术搜索: {error}");
                                     let (x, y) =
                                         ai_move(&game.board, Cell::White, game.history.len());
@@ -547,6 +605,7 @@ async fn main() {
                                 }
                                 Err(TryRecvError::Empty) => {}
                                 Err(TryRecvError::Disconnected) => {
+                                    openrouter_status = "OpenRouter: call stopped".to_string();
                                     let (x, y) =
                                         ai_move(&game.board, Cell::White, game.history.len());
                                     game.place(x, y);
