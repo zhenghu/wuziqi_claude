@@ -46,8 +46,8 @@ impl LlmConfig {
         if model.is_empty() {
             return Err("OpenRouter model name is required".to_string());
         }
-        if !(api_url.starts_with("https://") || api_url.starts_with("http://")) {
-            return Err("API URL must start with http:// or https://".to_string());
+        if !api_url.starts_with("https://") {
+            return Err("API URL must use HTTPS".to_string());
         }
         if !api_url.ends_with("/chat/completions") {
             return Err("OpenRouter API URL must end with /chat/completions".to_string());
@@ -374,6 +374,16 @@ mod tests {
         assert!(LlmConfig::new("key".into(), DEFAULT_API_URL.into(), "model".into()).is_ok());
         assert!(LlmConfig::new("".into(), DEFAULT_API_URL.into(), "model".into()).is_err());
         assert!(LlmConfig::new("key".into(), "not-a-url".into(), "model".into()).is_err());
+        assert_eq!(
+            LlmConfig::new(
+                "key".into(),
+                "http://openrouter.ai/api/v1/chat/completions".into(),
+                "model".into()
+            )
+            .err()
+            .as_deref(),
+            Some("API URL must use HTTPS")
+        );
         assert!(LlmConfig::new(
             "key".into(),
             "https://openrouter.ai/api/v1".into(),
