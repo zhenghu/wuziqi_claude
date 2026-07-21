@@ -42,13 +42,16 @@ pub(crate) struct App {
 
 impl App {
     pub(crate) fn new() -> Self {
-        let active_llm_config = match LlmConfig::load() {
-            Ok(config) => Some(config),
+        let had_config = config_exists();
+        let (active_llm_config, config_load_error) = match LlmConfig::load() {
+            Ok(config) => (Some(config), None),
             Err(error) => {
-                if config_exists() {
+                if had_config {
                     eprintln!("OpenRouter 配置加载失败: {error}");
+                    (None, Some(format!("Configuration load failed: {error}")))
+                } else {
+                    (None, None)
                 }
-                None
             }
         };
         let ai_algorithm = if active_llm_config.is_some() {
@@ -67,7 +70,7 @@ impl App {
             ai_thinking: false,
             pending_llm: None,
             ai_notice: String::new(),
-            config_page: LlmConfigPage::new(),
+            config_page: LlmConfigPage::new(active_llm_config.as_ref(), config_load_error),
             active_llm_config,
             openrouter_status: openrouter_status.to_string(),
             show_config: false,

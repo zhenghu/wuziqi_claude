@@ -7,6 +7,8 @@ use std::fs::OpenOptions;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -61,14 +63,45 @@ fn replace_config_file(source: &Path, destination: &Path) -> std::io::Result<()>
 
 #[cfg(target_os = "windows")]
 fn replace_config_file(source: &Path, destination: &Path) -> std::io::Result<()> {
-    if destination.exists() {
-        std::fs::remove_file(destination)?;
+    if !destination.exists() {
+        return std::fs::rename(source, destination);
     }
-    std::fs::rename(source, destination)
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    // ReplaceFileW preserves an existing valid destination until the replacement
+    // succeeds, unlike remove-then-rename.
+    let replaced = unsafe {
+        windows_sys::Win32::Storage::FileSystem::ReplaceFileW(
+            destination.as_ptr(),
+            source.as_ptr(),
+            std::ptr::null(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if replaced == 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 fn legacy_config_path() -> PathBuf {
     PathBuf::from(CONFIG_FILE_NAME)
+}
+
+fn migrated_legacy_config_path(legacy: &Path) -> PathBuf {
+    legacy.with_file_name(format!("{CONFIG_FILE_NAME}.migrated"))
 }
 
 pub(crate) fn config_exists() -> bool {
@@ -140,11 +173,20 @@ impl LlmConfig {
             // the final configuration directly to the system location.
             let (config, _) = Self::read_from_path(legacy)?;
             config.save_to_path(current)?;
-            if let Err(error) = std::fs::remove_file(legacy) {
+            let archived = migrated_legacy_config_path(legacy);
+            if archived.exists() {
                 eprintln!(
-                    "配置已迁移到 {}，但无法删除旧文件 {}: {error}",
+                    "配置已迁移到 {}；归档文件 {} 已存在，因此保留旧文件 {}",
                     current.display(),
+                    archived.display(),
                     legacy.display()
+                );
+            } else if let Err(error) = std::fs::rename(legacy, &archived) {
+                eprintln!(
+                    "配置已迁移到 {}，但无法将旧文件 {} 归档为 {}: {error}",
+                    current.display(),
+                    legacy.display(),
+                    archived.display()
                 );
             }
             return Ok(config);
@@ -546,6 +588,7 @@ mod tests {
         assert_eq!(loaded.api_key(), legacy_key.trim_end_matches('v'));
         assert!(current.exists());
         assert!(!legacy.exists());
+        assert!(migrated_legacy_config_path(&legacy).exists());
         let (migrated, repaired) = LlmConfig::read_from_path(&current).unwrap();
         assert_eq!(migrated.model(), "model");
         assert!(!repaired);
