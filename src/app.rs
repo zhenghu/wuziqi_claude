@@ -4,7 +4,7 @@ use crate::ai::{ai_move, llm_candidate_moves};
 use crate::board_view::{self, Button, TOP_BAR, WIN_H, WIN_W};
 use crate::config_ui::{ConfigAction, LlmConfigPage};
 use crate::game::{Cell, Game, Mode, Status};
-use crate::llm_ai::{request_move, LlmConfig, LlmMove, CONFIG_PATH};
+use crate::llm_ai::{config_exists, request_move, LlmConfig, LlmMove};
 use macroquad::prelude::*;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use tokio::sync::oneshot;
@@ -45,7 +45,7 @@ impl App {
         let active_llm_config = match LlmConfig::load() {
             Ok(config) => Some(config),
             Err(error) => {
-                if std::path::Path::new(CONFIG_PATH).exists() {
+                if config_exists() {
                     eprintln!("OpenRouter 配置加载失败: {error}");
                 }
                 None
