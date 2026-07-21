@@ -7,6 +7,7 @@ use crate::game::{Cell, Game, Mode, Status};
 use crate::llm_ai::{request_move, LlmConfig, LlmMove, CONFIG_PATH};
 use macroquad::prelude::*;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use tokio::sync::oneshot;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AiAlgorithm {
@@ -14,11 +15,24 @@ enum AiAlgorithm {
     LargeModel,
 }
 
+struct PendingLlmRequest {
+    result: Receiver<Result<LlmMove, String>>,
+    cancel: Option<oneshot::Sender<()>>,
+}
+
+impl Drop for PendingLlmRequest {
+    fn drop(&mut self) {
+        if let Some(cancel) = self.cancel.take() {
+            let _ = cancel.send(());
+        }
+    }
+}
+
 pub(crate) struct App {
     game: Game,
     ai_algorithm: AiAlgorithm,
     ai_thinking: bool,
-    pending_llm: Option<Receiver<Result<LlmMove, String>>>,
+    pending_llm: Option<PendingLlmRequest>,
     ai_notice: String,
     config_page: LlmConfigPage,
     active_llm_config: Option<LlmConfig>,
@@ -305,19 +319,37 @@ impl App {
         };
         let model = config.model().to_string();
         self.openrouter_status = "OpenRouter: connecting...".to_string();
-        let (sender, receiver) = mpsc::channel();
+        let (result_sender, result_receiver) = mpsc::channel();
+        let (cancel_sender, cancel_receiver) = oneshot::channel();
         std::thread::spawn(move || {
-            let _ = sender.send(request_move(&config, &board, &candidates));
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            let result = match runtime {
+                Ok(runtime) => runtime.block_on(async {
+                    tokio::select! {
+                        _ = cancel_receiver => None,
+                        result = request_move(&config, &board, &candidates) => Some(result),
+                    }
+                }),
+                Err(error) => Some(Err(format!("Cannot start LLM runtime: {error}"))),
+            };
+            if let Some(result) = result {
+                let _ = result_sender.send(result);
+            }
         });
-        self.pending_llm = Some(receiver);
+        self.pending_llm = Some(PendingLlmRequest {
+            result: result_receiver,
+            cancel: Some(cancel_sender),
+        });
         eprintln!("正在请求大模型 {model} 选择落点……");
     }
 
     fn poll_llm_request(&mut self) {
-        let Some(receiver) = &self.pending_llm else {
+        let Some(pending) = &self.pending_llm else {
             return;
         };
-        match receiver.try_recv() {
+        match pending.result.try_recv() {
             Ok(Ok(llm_move)) => {
                 self.openrouter_status = llm_move.route_label();
                 self.game.place(llm_move.position.0, llm_move.position.1);
@@ -352,6 +384,8 @@ impl App {
 
     fn cancel_ai(&mut self) {
         self.ai_thinking = false;
+        // Dropping the pending request sends its cancellation signal, causing
+        // tokio::select! to drop the in-flight HTTP future and close the connection.
         self.pending_llm = None;
         self.ai_notice.clear();
     }
@@ -382,4 +416,21 @@ pub(crate) fn compact_text(value: &str, max_chars: usize) -> String {
     }
     let keep = max_chars.saturating_sub(3);
     format!("{}...", value.chars().take(keep).collect::<String>())
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    #[test]
+    fn dropping_a_pending_request_sends_cancellation() {
+        let (_result_sender, result) = mpsc::channel();
+        let (cancel, mut cancelled) = oneshot::channel();
+        drop(PendingLlmRequest {
+            result,
+            cancel: Some(cancel),
+        });
+
+        assert_eq!(cancelled.try_recv(), Ok(()));
+    }
 }
