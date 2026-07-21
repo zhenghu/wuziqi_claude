@@ -31,12 +31,12 @@ pub(crate) struct LlmConfigPage {
     active: ConfigField,
     reveal_key: bool,
     message: String,
+    load_error: Option<String>,
     suppress_paste_chars: bool,
 }
 
 impl LlmConfigPage {
-    pub(crate) fn new() -> Self {
-        let saved = LlmConfig::load().ok();
+    pub(crate) fn new(saved: Option<&LlmConfig>, load_error: Option<String>) -> Self {
         Self {
             api_key: saved
                 .as_ref()
@@ -52,6 +52,7 @@ impl LlmConfigPage {
             active: ConfigField::ApiKey,
             reveal_key: false,
             message: String::new(),
+            load_error,
             suppress_paste_chars: false,
         }
     }
@@ -59,7 +60,7 @@ impl LlmConfigPage {
     pub(crate) fn open(&mut self) {
         self.active = ConfigField::ApiKey;
         self.reveal_key = false;
-        self.message.clear();
+        self.message = self.load_error.clone().unwrap_or_default();
     }
 
     fn active_value_mut(&mut self) -> &mut String {
@@ -254,7 +255,10 @@ impl LlmConfigPage {
                 self.model.clone(),
             ) {
                 Ok(config) => match config.save() {
-                    Ok(()) => return ConfigAction::Save(config),
+                    Ok(()) => {
+                        self.load_error = None;
+                        return ConfigAction::Save(config);
+                    }
                     Err(error) => self.message = error,
                 },
                 Err(error) => self.message = error,
@@ -366,7 +370,7 @@ mod tests {
 
     #[test]
     fn pasting_an_api_key_replaces_the_previous_value() {
-        let mut page = LlmConfigPage::new();
+        let mut page = LlmConfigPage::new(None, None);
         page.active = ConfigField::ApiKey;
         page.api_key = "old-key".to_string();
 
@@ -374,5 +378,14 @@ mod tests {
 
         assert_eq!(page.api_key, "new-key");
         assert!(page.message.is_empty());
+    }
+
+    #[test]
+    fn opening_configuration_surfaces_a_previous_load_error() {
+        let mut page = LlmConfigPage::new(None, Some("Invalid configuration".to_string()));
+
+        page.open();
+
+        assert_eq!(page.message, "Invalid configuration");
     }
 }

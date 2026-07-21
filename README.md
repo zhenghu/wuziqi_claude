@@ -25,7 +25,7 @@ cargo run --release
 
 大模型模式使用 OpenRouter Chat Completions API。点击顶部 `Config (C)` 或按 `C` 打开配置页面，可填写 OpenRouter API Key、模型名称和 API 地址。配置保存在系统用户配置目录，并在 macOS/Linux 上设置为仅当前用户可读写。
 
-macOS 配置路径为 `~/Library/Application Support/Wuziqi/llm_config.json`。旧版项目目录中的 `llm_config.json` 会在首次启动时自动迁移到新位置并删除旧副本。也可以复制示例文件后直接编辑 JSON：
+macOS 配置路径为 `~/Library/Application Support/Wuziqi/llm_config.json`。旧版项目目录中的 `llm_config.json` 会在首次启动时自动迁移到新位置，并归档为 `llm_config.json.migrated`，避免误删原文件。也可以复制示例文件后直接编辑 JSON：
 
 ```bash
 mkdir -p "$HOME/Library/Application Support/Wuziqi"
