@@ -7,11 +7,49 @@ use std::fs::OpenOptions;
 use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-pub(crate) const CONFIG_PATH: &str = "llm_config.json";
+const CONFIG_FILE_NAME: &str = "llm_config.json";
 pub(crate) const DEFAULT_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 pub(crate) const DEFAULT_MODEL: &str = "openai/gpt-5-mini";
+
+pub(crate) fn config_path() -> Result<PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")
+            .ok_or_else(|| "Cannot determine the user home directory".to_string())?;
+        Ok(PathBuf::from(home)
+            .join("Library/Application Support/Wuziqi")
+            .join(CONFIG_FILE_NAME))
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let app_data = std::env::var_os("APPDATA")
+            .ok_or_else(|| "Cannot determine the application data directory".to_string())?;
+        Ok(PathBuf::from(app_data)
+            .join("Wuziqi")
+            .join(CONFIG_FILE_NAME))
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .ok_or_else(|| "Cannot determine the user configuration directory".to_string())?;
+        Ok(base.join("wuziqi").join(CONFIG_FILE_NAME))
+    }
+}
+
+fn legacy_config_path() -> PathBuf {
+    PathBuf::from(CONFIG_FILE_NAME)
+}
+
+pub(crate) fn config_exists() -> bool {
+    config_path().is_ok_and(|path| path.exists()) || legacy_config_path().exists()
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct LlmConfig {
@@ -60,36 +98,73 @@ impl LlmConfig {
     }
 
     pub(crate) fn load() -> Result<Self, String> {
-        let text = std::fs::read_to_string(CONFIG_PATH)
-            .map_err(|error| format!("Cannot read {CONFIG_PATH}: {error}"))?;
+        let current = config_path()?;
+        let legacy = legacy_config_path();
+        Self::load_with_paths(&current, &legacy)
+    }
+
+    fn load_with_paths(current: &Path, legacy: &Path) -> Result<Self, String> {
+        if current.exists() {
+            return Self::load_from_path(current);
+        }
+        if legacy.exists() {
+            let config = Self::load_from_path(legacy)?;
+            config.save_to_path(current)?;
+            if let Err(error) = std::fs::remove_file(legacy) {
+                eprintln!(
+                    "配置已迁移到 {}，但无法删除旧文件 {}: {error}",
+                    current.display(),
+                    legacy.display()
+                );
+            }
+            return Ok(config);
+        }
+        Self::load_from_path(current)
+    }
+
+    fn load_from_path(path: &Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path)
+            .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
         let mut raw: Self = serde_json::from_str(&text)
-            .map_err(|error| format!("Invalid JSON in {CONFIG_PATH}: {error}"))?;
+            .map_err(|error| format!("Invalid JSON in {}: {error}", path.display()))?;
         let repaired = repair_paste_artifact(&raw.api_key);
         let changed = repaired != raw.api_key;
         raw.api_key = repaired;
         let config = Self::new(raw.api_key, raw.api_url, raw.model)?;
         if changed {
-            config.save()?;
+            config.save_to_path(path)?;
         }
         Ok(config)
     }
 
     pub(crate) fn save(&self) -> Result<(), String> {
+        self.save_to_path(&config_path()?)
+    }
+
+    fn save_to_path(&self, path: &Path) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self)
-            .map_err(|error| format!("Cannot serialize {CONFIG_PATH}: {error}"))?;
+            .map_err(|error| format!("Cannot serialize {}: {error}", path.display()))?;
+        let directory = path
+            .parent()
+            .ok_or_else(|| format!("Invalid configuration path: {}", path.display()))?;
+        std::fs::create_dir_all(directory)
+            .map_err(|error| format!("Cannot create {}: {error}", directory.display()))?;
+        #[cfg(unix)]
+        std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| format!("Cannot secure {}: {error}", directory.display()))?;
         let mut options = OpenOptions::new();
         options.create(true).truncate(true).write(true);
         #[cfg(unix)]
         options.mode(0o600);
         let mut file = options
-            .open(CONFIG_PATH)
-            .map_err(|error| format!("Cannot write {CONFIG_PATH}: {error}"))?;
+            .open(path)
+            .map_err(|error| format!("Cannot write {}: {error}", path.display()))?;
         file.write_all(json.as_bytes())
             .and_then(|_| file.write_all(b"\n"))
-            .map_err(|error| format!("Cannot write {CONFIG_PATH}: {error}"))?;
+            .map_err(|error| format!("Cannot write {}: {error}", path.display()))?;
         #[cfg(unix)]
-        std::fs::set_permissions(CONFIG_PATH, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Cannot secure {CONFIG_PATH}: {error}"))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|error| format!("Cannot secure {}: {error}", path.display()))?;
         Ok(())
     }
 
@@ -397,5 +472,35 @@ mod tests {
         )
         .is_err());
         assert!(LlmConfig::new("key".into(), DEFAULT_API_URL.into(), "".into()).is_err());
+    }
+
+    #[test]
+    fn migrates_legacy_configuration_to_the_system_path() {
+        let unique = format!(
+            "wuziqi-config-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let legacy = root.join(CONFIG_FILE_NAME);
+        let current = root.join("system").join(CONFIG_FILE_NAME);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            &legacy,
+            format!(r#"{{"api_key":"key","api_url":"{DEFAULT_API_URL}","model":"model"}}"#),
+        )
+        .unwrap();
+
+        let loaded = LlmConfig::load_with_paths(&current, &legacy).unwrap();
+
+        assert_eq!(loaded.api_key(), "key");
+        assert!(current.exists());
+        assert!(!legacy.exists());
+        let migrated = LlmConfig::load_from_path(&current).unwrap();
+        assert_eq!(migrated.model(), "model");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

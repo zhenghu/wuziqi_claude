@@ -23,12 +23,13 @@ cargo run --release
 
 ### 大模型 AI（原生版）
 
-大模型模式使用 OpenRouter Chat Completions API。点击顶部 `Config (C)` 或按 `C` 打开配置页面，可填写 OpenRouter API Key、模型名称和 API 地址。保存后配置会写入项目目录下的 `llm_config.json`，并在 macOS/Linux 上设置为仅当前用户可读写。
+大模型模式使用 OpenRouter Chat Completions API。点击顶部 `Config (C)` 或按 `C` 打开配置页面，可填写 OpenRouter API Key、模型名称和 API 地址。配置保存在系统用户配置目录，并在 macOS/Linux 上设置为仅当前用户可读写。
 
-也可以复制示例文件后直接编辑 JSON：
+macOS 配置路径为 `~/Library/Application Support/Wuziqi/llm_config.json`。旧版项目目录中的 `llm_config.json` 会在首次启动时自动迁移到新位置并删除旧副本。也可以复制示例文件后直接编辑 JSON：
 
 ```bash
-cp llm_config.example.json llm_config.json
+mkdir -p "$HOME/Library/Application Support/Wuziqi"
+cp llm_config.example.json "$HOME/Library/Application Support/Wuziqi/llm_config.json"
 cargo run --release
 ```
 
@@ -40,7 +41,7 @@ cargo run --release
 }
 ```
 
-`llm_config.json` 已加入 `.gitignore`，不会被 Git 提交；仓库中的 `llm_config.example.json` 不包含真实密钥。配置页面支持 API Key 脱敏显示、显示/隐藏、`Paste` 按钮、`Cmd/Ctrl+V` 粘贴和保存前校验。保存后自动切换到 OpenRouter AI。请求超时、服务报错或模型返回非法坐标时，会自动降级到经典搜索。
+仓库中的 `llm_config.example.json` 不包含真实密钥。配置页面支持 API Key 脱敏显示、显示/隐藏、`Paste` 按钮、`Cmd/Ctrl+V` 粘贴和保存前校验。保存后自动切换到 OpenRouter AI。请求超时、服务报错或模型返回非法坐标时，会自动降级到经典搜索。
 
 没装 Rust 的话,macOS 下直接双击 `run_wuziqi.command`,脚本会自动通过 [rustup](https://rustup.rs) 安装工具链并编译运行。
 

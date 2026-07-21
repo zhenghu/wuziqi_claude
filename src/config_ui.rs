@@ -1,6 +1,6 @@
 //! OpenRouter 配置弹窗。配置保存为被 Git 忽略的 JSON 文件。
 
-use crate::llm_ai::{LlmConfig, CONFIG_PATH, DEFAULT_API_URL, DEFAULT_MODEL};
+use crate::llm_ai::{config_path, LlmConfig, DEFAULT_API_URL, DEFAULT_MODEL};
 use macroquad::miniquad::window::clipboard_get;
 use macroquad::prelude::*;
 #[cfg(target_os = "macos")]
@@ -156,7 +156,11 @@ impl LlmConfigPage {
         );
 
         draw_text("OpenRouter Configuration", 100.0, 150.0, 28.0, WHITE);
-        let storage_note = format!("Saved to {CONFIG_PATH} (local only, ignored by Git).");
+        let storage_note = config_path().map_or_else(
+            |error| format!("Configuration path unavailable: {error}"),
+            |path| format!("Saved to {}", path.display()),
+        );
+        let storage_note = visible_tail(&storage_note, 64);
         draw_text(
             &storage_note,
             100.0,
