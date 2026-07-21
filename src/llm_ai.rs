@@ -198,7 +198,7 @@ fn parse_move(text: &str) -> Option<(usize, usize)> {
     (values.len() == 2).then(|| (values[0], values[1]))
 }
 
-pub(crate) fn request_move(
+pub(crate) async fn request_move(
     config: &LlmConfig,
     board: &[[Cell; BOARD]; BOARD],
     candidates: &[(usize, usize)],
@@ -236,27 +236,33 @@ pub(crate) fn request_move(
         },
     };
 
-    let response = match ureq::post(&config.api_url)
-        .set("Authorization", &format!("Bearer {}", config.api_key))
-        .set("Content-Type", "application/json")
-        .set("X-OpenRouter-Title", "Wuziqi")
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
-        .send_json(&request)
-    {
-        Ok(response) => response,
-        Err(ureq::Error::Status(code, response)) => {
-            let body = response.into_string().unwrap_or_default();
-            let detail = serde_json::from_str::<Value>(&body)
-                .ok()
-                .and_then(|value| api_error_message(&value).map(str::to_string))
-                .unwrap_or_else(|| "unknown API error".to_string());
-            return Err(format!("OpenRouter HTTP {code}: {detail}"));
-        }
-        Err(error) => return Err(format!("OpenRouter request failed: {error}")),
-    };
-    let value: Value = response
-        .into_json()
-        .map_err(|error| format!("OpenRouter returned invalid JSON: {error}"))?;
+        .build()
+        .map_err(|error| format!("Cannot create OpenRouter client: {error}"))?;
+    let response = client
+        .post(&config.api_url)
+        .bearer_auth(&config.api_key)
+        .header("X-OpenRouter-Title", "Wuziqi")
+        .json(&request)
+        .send()
+        .await
+        .map_err(|error| format!("OpenRouter request failed: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Cannot read OpenRouter response: {error}"))?;
+    let parsed = serde_json::from_str::<Value>(&body);
+    if !status.is_success() {
+        let detail = parsed
+            .as_ref()
+            .ok()
+            .and_then(api_error_message)
+            .unwrap_or("unknown API error");
+        return Err(format!("OpenRouter HTTP {}: {detail}", status.as_u16()));
+    }
+    let value = parsed.map_err(|error| format!("OpenRouter returned invalid JSON: {error}"))?;
     if let Some(error) = api_error_message(&value) {
         return Err(format!("OpenRouter error: {error}"));
     }
