@@ -43,6 +43,30 @@ pub(crate) fn config_path() -> Result<PathBuf, String> {
     }
 }
 
+fn temporary_config_path(path: &Path) -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(CONFIG_FILE_NAME);
+    path.with_file_name(format!(".{file_name}.tmp-{}-{nonce}", std::process::id()))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn replace_config_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+#[cfg(target_os = "windows")]
+fn replace_config_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if destination.exists() {
+        std::fs::remove_file(destination)?;
+    }
+    std::fs::rename(source, destination)
+}
+
 fn legacy_config_path() -> PathBuf {
     PathBuf::from(CONFIG_FILE_NAME)
 }
@@ -105,10 +129,16 @@ impl LlmConfig {
 
     fn load_with_paths(current: &Path, legacy: &Path) -> Result<Self, String> {
         if current.exists() {
-            return Self::load_from_path(current);
+            let (config, repaired) = Self::read_from_path(current)?;
+            if repaired {
+                config.save_to_path(current)?;
+            }
+            return Ok(config);
         }
         if legacy.exists() {
-            let config = Self::load_from_path(legacy)?;
+            // Never modify the legacy source. Apply repairs in memory and write
+            // the final configuration directly to the system location.
+            let (config, _) = Self::read_from_path(legacy)?;
             config.save_to_path(current)?;
             if let Err(error) = std::fs::remove_file(legacy) {
                 eprintln!(
@@ -119,10 +149,10 @@ impl LlmConfig {
             }
             return Ok(config);
         }
-        Self::load_from_path(current)
+        Self::read_from_path(current).map(|(config, _)| config)
     }
 
-    fn load_from_path(path: &Path) -> Result<Self, String> {
+    fn read_from_path(path: &Path) -> Result<(Self, bool), String> {
         let text = std::fs::read_to_string(path)
             .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
         let mut raw: Self = serde_json::from_str(&text)
@@ -131,10 +161,7 @@ impl LlmConfig {
         let changed = repaired != raw.api_key;
         raw.api_key = repaired;
         let config = Self::new(raw.api_key, raw.api_url, raw.model)?;
-        if changed {
-            config.save_to_path(path)?;
-        }
-        Ok(config)
+        Ok((config, changed))
     }
 
     pub(crate) fn save(&self) -> Result<(), String> {
@@ -152,20 +179,35 @@ impl LlmConfig {
         #[cfg(unix)]
         std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
             .map_err(|error| format!("Cannot secure {}: {error}", directory.display()))?;
+        let temporary = temporary_config_path(path);
         let mut options = OpenOptions::new();
-        options.create(true).truncate(true).write(true);
+        options.create_new(true).write(true);
         #[cfg(unix)]
         options.mode(0o600);
-        let mut file = options
-            .open(path)
-            .map_err(|error| format!("Cannot write {}: {error}", path.display()))?;
-        file.write_all(json.as_bytes())
-            .and_then(|_| file.write_all(b"\n"))
-            .map_err(|error| format!("Cannot write {}: {error}", path.display()))?;
-        #[cfg(unix)]
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .map_err(|error| format!("Cannot secure {}: {error}", path.display()))?;
-        Ok(())
+        let result = (|| {
+            let mut file = options
+                .open(&temporary)
+                .map_err(|error| format!("Cannot create {}: {error}", temporary.display()))?;
+            file.write_all(json.as_bytes())
+                .and_then(|_| file.write_all(b"\n"))
+                .and_then(|_| file.sync_all())
+                .map_err(|error| format!("Cannot write {}: {error}", temporary.display()))?;
+            drop(file);
+            #[cfg(unix)]
+            std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
+                .map_err(|error| format!("Cannot secure {}: {error}", temporary.display()))?;
+            replace_config_file(&temporary, path)
+                .map_err(|error| format!("Cannot replace {}: {error}", path.display()))?;
+            #[cfg(unix)]
+            std::fs::File::open(directory)
+                .and_then(|directory| directory.sync_all())
+                .map_err(|error| format!("Cannot sync {}: {error}", directory.display()))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temporary);
+        }
+        result
     }
 
     pub(crate) fn api_key(&self) -> &str {
@@ -488,19 +530,53 @@ mod tests {
         let legacy = root.join(CONFIG_FILE_NAME);
         let current = root.join("system").join(CONFIG_FILE_NAME);
         std::fs::create_dir_all(&root).unwrap();
+        let legacy_key = format!("sk-or-v1-{}v", "a".repeat(64));
         std::fs::write(
             &legacy,
-            format!(r#"{{"api_key":"key","api_url":"{DEFAULT_API_URL}","model":"model"}}"#),
+            format!(
+                r#"{{"api_key":"{legacy_key}","api_url":"{DEFAULT_API_URL}","model":"model"}}"#
+            ),
         )
         .unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o400)).unwrap();
 
         let loaded = LlmConfig::load_with_paths(&current, &legacy).unwrap();
 
-        assert_eq!(loaded.api_key(), "key");
+        assert_eq!(loaded.api_key(), legacy_key.trim_end_matches('v'));
         assert!(current.exists());
         assert!(!legacy.exists());
-        let migrated = LlmConfig::load_from_path(&current).unwrap();
+        let (migrated, repaired) = LlmConfig::read_from_path(&current).unwrap();
         assert_eq!(migrated.model(), "model");
+        assert!(!repaired);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomically_replaces_an_existing_configuration() {
+        let unique = format!(
+            "wuziqi-save-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = std::env::temp_dir().join(unique);
+        let path = root.join(CONFIG_FILE_NAME);
+        let original =
+            LlmConfig::new("old-key".into(), DEFAULT_API_URL.into(), "old".into()).unwrap();
+        original.save_to_path(&path).unwrap();
+        let replacement =
+            LlmConfig::new("new-key".into(), DEFAULT_API_URL.into(), "new".into()).unwrap();
+
+        replacement.save_to_path(&path).unwrap();
+
+        let (loaded, repaired) = LlmConfig::read_from_path(&path).unwrap();
+        assert_eq!(loaded.api_key(), "new-key");
+        assert_eq!(loaded.model(), "new");
+        assert!(!repaired);
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }
 }
