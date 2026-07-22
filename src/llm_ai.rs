@@ -3,8 +3,9 @@
 use crate::game::{Cell, BOARD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::fmt;
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{self, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 #[cfg(target_os = "windows")]
@@ -15,12 +16,67 @@ use std::time::Duration;
 const CONFIG_FILE_NAME: &str = "llm_config.json";
 pub(crate) const DEFAULT_API_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
 pub(crate) const DEFAULT_MODEL: &str = "openai/gpt-5-mini";
+const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+const MAX_ERROR_TEXT_CHARS: usize = 512;
 
-pub(crate) fn config_path() -> Result<PathBuf, String> {
+#[derive(Debug)]
+pub(crate) enum ConfigError {
+    Path(String),
+    Invalid(String),
+    Io {
+        operation: &'static str,
+        path: PathBuf,
+        source: io::Error,
+    },
+    Json {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+}
+
+impl ConfigError {
+    fn io(operation: &'static str, path: &Path, source: io::Error) -> Self {
+        Self::Io {
+            operation,
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Path(message) | Self::Invalid(message) => formatter.write_str(message),
+            Self::Io {
+                operation,
+                path,
+                source,
+            } => write!(formatter, "Cannot {operation} {}: {source}", path.display()),
+            Self::Json { path, source } => {
+                write!(formatter, "Invalid JSON in {}: {source}", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io { source, .. } => Some(source),
+            Self::Json { source, .. } => Some(source),
+            Self::Path(_) | Self::Invalid(_) => None,
+        }
+    }
+}
+
+type ConfigResult<T> = Result<T, ConfigError>;
+
+pub(crate) fn config_path() -> ConfigResult<PathBuf> {
     #[cfg(target_os = "macos")]
     {
         let home = std::env::var_os("HOME")
-            .ok_or_else(|| "Cannot determine the user home directory".to_string())?;
+            .ok_or_else(|| ConfigError::Path("Cannot determine the user home directory".into()))?;
         Ok(PathBuf::from(home)
             .join("Library/Application Support/Wuziqi")
             .join(CONFIG_FILE_NAME))
@@ -28,8 +84,9 @@ pub(crate) fn config_path() -> Result<PathBuf, String> {
 
     #[cfg(target_os = "windows")]
     {
-        let app_data = std::env::var_os("APPDATA")
-            .ok_or_else(|| "Cannot determine the application data directory".to_string())?;
+        let app_data = std::env::var_os("APPDATA").ok_or_else(|| {
+            ConfigError::Path("Cannot determine the application data directory".into())
+        })?;
         Ok(PathBuf::from(app_data)
             .join("Wuziqi")
             .join(CONFIG_FILE_NAME))
@@ -40,7 +97,9 @@ pub(crate) fn config_path() -> Result<PathBuf, String> {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
-            .ok_or_else(|| "Cannot determine the user configuration directory".to_string())?;
+            .ok_or_else(|| {
+                ConfigError::Path("Cannot determine the user configuration directory".into())
+            })?;
         Ok(base.join("wuziqi").join(CONFIG_FILE_NAME))
     }
 }
@@ -104,6 +163,16 @@ fn migrated_legacy_config_path(legacy: &Path) -> PathBuf {
     legacy.with_file_name(format!("{CONFIG_FILE_NAME}.migrated"))
 }
 
+#[cfg(unix)]
+fn secure_legacy_file(path: &Path) {
+    if let Err(error) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+        eprintln!("无法限制旧配置文件 {} 的权限: {error}", path.display());
+    }
+}
+
+#[cfg(not(unix))]
+fn secure_legacy_file(_path: &Path) {}
+
 pub(crate) fn config_exists() -> bool {
     config_path().is_ok_and(|path| path.exists()) || legacy_config_path().exists()
 }
@@ -115,6 +184,7 @@ pub(crate) struct LlmConfig {
     model: String,
 }
 
+#[derive(Debug)]
 pub(crate) struct LlmMove {
     pub(crate) position: (usize, usize),
     model: String,
@@ -131,21 +201,44 @@ impl LlmMove {
 }
 
 impl LlmConfig {
-    pub(crate) fn new(api_key: String, api_url: String, model: String) -> Result<Self, String> {
+    pub(crate) fn new(api_key: String, api_url: String, model: String) -> ConfigResult<Self> {
         let api_key = api_key.trim().to_string();
         let api_url = api_url.trim().trim_end_matches('/').to_string();
         let model = model.trim().to_string();
         if api_key.is_empty() {
-            return Err("OpenRouter API Key is required".to_string());
+            return Err(ConfigError::Invalid(
+                "OpenRouter API Key is required".to_string(),
+            ));
         }
         if model.is_empty() {
-            return Err("OpenRouter model name is required".to_string());
+            return Err(ConfigError::Invalid(
+                "OpenRouter model name is required".to_string(),
+            ));
         }
-        if !api_url.starts_with("https://") {
-            return Err("API URL must use HTTPS".to_string());
+        let parsed = reqwest::Url::parse(&api_url)
+            .map_err(|error| ConfigError::Invalid(format!("Invalid API URL: {error}")))?;
+        if parsed.scheme() != "https" {
+            return Err(ConfigError::Invalid("API URL must use HTTPS".to_string()));
         }
-        if !api_url.ends_with("/chat/completions") {
-            return Err("OpenRouter API URL must end with /chat/completions".to_string());
+        if parsed.host_str() != Some("openrouter.ai") {
+            return Err(ConfigError::Invalid(
+                "API URL host must be openrouter.ai".to_string(),
+            ));
+        }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(ConfigError::Invalid(
+                "API URL must not contain credentials".to_string(),
+            ));
+        }
+        if parsed.query().is_some() || parsed.fragment().is_some() {
+            return Err(ConfigError::Invalid(
+                "API URL must not contain a query or fragment".to_string(),
+            ));
+        }
+        if parsed.path() != "/api/v1/chat/completions" {
+            return Err(ConfigError::Invalid(
+                "OpenRouter API URL must use /api/v1/chat/completions".to_string(),
+            ));
         }
         Ok(Self {
             api_key,
@@ -154,13 +247,22 @@ impl LlmConfig {
         })
     }
 
-    pub(crate) fn load() -> Result<Self, String> {
+    #[cfg(test)]
+    pub(crate) fn new_unchecked(api_key: String, api_url: String, model: String) -> Self {
+        Self {
+            api_key,
+            api_url,
+            model,
+        }
+    }
+
+    pub(crate) fn load() -> ConfigResult<Self> {
         let current = config_path()?;
         let legacy = legacy_config_path();
         Self::load_with_paths(&current, &legacy)
     }
 
-    fn load_with_paths(current: &Path, legacy: &Path) -> Result<Self, String> {
+    fn load_with_paths(current: &Path, legacy: &Path) -> ConfigResult<Self> {
         if current.exists() {
             let (config, repaired) = Self::read_from_path(current)?;
             if repaired {
@@ -175,30 +277,39 @@ impl LlmConfig {
             config.save_to_path(current)?;
             let archived = migrated_legacy_config_path(legacy);
             if archived.exists() {
+                secure_legacy_file(legacy);
+                secure_legacy_file(&archived);
                 eprintln!(
                     "配置已迁移到 {}；归档文件 {} 已存在，因此保留旧文件 {}",
                     current.display(),
                     archived.display(),
                     legacy.display()
                 );
-            } else if let Err(error) = std::fs::rename(legacy, &archived) {
-                eprintln!(
-                    "配置已迁移到 {}，但无法将旧文件 {} 归档为 {}: {error}",
-                    current.display(),
-                    legacy.display(),
-                    archived.display()
-                );
+            } else {
+                secure_legacy_file(legacy);
+                if let Err(error) = std::fs::rename(legacy, &archived) {
+                    eprintln!(
+                        "配置已迁移到 {}，但无法将旧文件 {} 归档为 {}: {error}",
+                        current.display(),
+                        legacy.display(),
+                        archived.display()
+                    );
+                } else {
+                    secure_legacy_file(&archived);
+                }
             }
             return Ok(config);
         }
         Self::read_from_path(current).map(|(config, _)| config)
     }
 
-    fn read_from_path(path: &Path) -> Result<(Self, bool), String> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|error| format!("Cannot read {}: {error}", path.display()))?;
-        let mut raw: Self = serde_json::from_str(&text)
-            .map_err(|error| format!("Invalid JSON in {}: {error}", path.display()))?;
+    fn read_from_path(path: &Path) -> ConfigResult<(Self, bool)> {
+        let text =
+            std::fs::read_to_string(path).map_err(|error| ConfigError::io("read", path, error))?;
+        let mut raw: Self = serde_json::from_str(&text).map_err(|source| ConfigError::Json {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let repaired = repair_paste_artifact(&raw.api_key);
         let changed = repaired != raw.api_key;
         raw.api_key = repaired;
@@ -206,21 +317,22 @@ impl LlmConfig {
         Ok((config, changed))
     }
 
-    pub(crate) fn save(&self) -> Result<(), String> {
+    pub(crate) fn save(&self) -> ConfigResult<()> {
         self.save_to_path(&config_path()?)
     }
 
-    fn save_to_path(&self, path: &Path) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|error| format!("Cannot serialize {}: {error}", path.display()))?;
-        let directory = path
-            .parent()
-            .ok_or_else(|| format!("Invalid configuration path: {}", path.display()))?;
+    fn save_to_path(&self, path: &Path) -> ConfigResult<()> {
+        let json = serde_json::to_string_pretty(self).map_err(|error| {
+            ConfigError::Invalid(format!("Cannot serialize {}: {error}", path.display()))
+        })?;
+        let directory = path.parent().ok_or_else(|| {
+            ConfigError::Path(format!("Invalid configuration path: {}", path.display()))
+        })?;
         std::fs::create_dir_all(directory)
-            .map_err(|error| format!("Cannot create {}: {error}", directory.display()))?;
+            .map_err(|error| ConfigError::io("create", directory, error))?;
         #[cfg(unix)]
         std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| format!("Cannot secure {}: {error}", directory.display()))?;
+            .map_err(|error| ConfigError::io("secure", directory, error))?;
         let temporary = temporary_config_path(path);
         let mut options = OpenOptions::new();
         options.create_new(true).write(true);
@@ -229,21 +341,21 @@ impl LlmConfig {
         let result = (|| {
             let mut file = options
                 .open(&temporary)
-                .map_err(|error| format!("Cannot create {}: {error}", temporary.display()))?;
+                .map_err(|error| ConfigError::io("create", &temporary, error))?;
             file.write_all(json.as_bytes())
                 .and_then(|_| file.write_all(b"\n"))
                 .and_then(|_| file.sync_all())
-                .map_err(|error| format!("Cannot write {}: {error}", temporary.display()))?;
+                .map_err(|error| ConfigError::io("write", &temporary, error))?;
             drop(file);
             #[cfg(unix)]
             std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o600))
-                .map_err(|error| format!("Cannot secure {}: {error}", temporary.display()))?;
+                .map_err(|error| ConfigError::io("secure", &temporary, error))?;
             replace_config_file(&temporary, path)
-                .map_err(|error| format!("Cannot replace {}: {error}", path.display()))?;
+                .map_err(|error| ConfigError::io("replace", path, error))?;
             #[cfg(unix)]
             std::fs::File::open(directory)
                 .and_then(|directory| directory.sync_all())
-                .map_err(|error| format!("Cannot sync {}: {error}", directory.display()))?;
+                .map_err(|error| ConfigError::io("sync", directory, error))?;
             Ok(())
         })();
         if result.is_err() {
@@ -358,6 +470,7 @@ fn parse_move(text: &str) -> Option<(usize, usize)> {
 }
 
 pub(crate) async fn request_move(
+    client: &reqwest::Client,
     config: &LlmConfig,
     board: &[[Cell; BOARD]; BOARD],
     candidates: &[(usize, usize)],
@@ -395,10 +508,6 @@ pub(crate) async fn request_move(
         },
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("Cannot create OpenRouter client: {error}"))?;
     let response = client
         .post(&config.api_url)
         .bearer_auth(&config.api_key)
@@ -408,10 +517,7 @@ pub(crate) async fn request_move(
         .await
         .map_err(|error| format!("OpenRouter request failed: {error}"))?;
     let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|error| format!("Cannot read OpenRouter response: {error}"))?;
+    let body = read_limited_body(response).await?;
     let parsed = serde_json::from_str::<Value>(&body);
     if !status.is_success() {
         let detail = parsed
@@ -419,11 +525,18 @@ pub(crate) async fn request_move(
             .ok()
             .and_then(api_error_message)
             .unwrap_or("unknown API error");
-        return Err(format!("OpenRouter HTTP {}: {detail}", status.as_u16()));
+        return Err(format!(
+            "OpenRouter HTTP {}: {}",
+            status.as_u16(),
+            truncate_text(detail, MAX_ERROR_TEXT_CHARS)
+        ));
     }
     let value = parsed.map_err(|error| format!("OpenRouter returned invalid JSON: {error}"))?;
     if let Some(error) = api_error_message(&value) {
-        return Err(format!("OpenRouter error: {error}"));
+        return Err(format!(
+            "OpenRouter error: {}",
+            truncate_text(error, MAX_ERROR_TEXT_CHARS)
+        ));
     }
     let text = response_text(&value).ok_or_else(|| {
         let finish_reason = value
@@ -438,7 +551,12 @@ pub(crate) async fn request_move(
             "OpenRouter response has no text (finish_reason={finish_reason}, reasoning_tokens={reasoning_tokens})"
         )
     })?;
-    let chosen = parse_move(&text).ok_or_else(|| format!("无法解析模型落点: {text}"))?;
+    let chosen = parse_move(&text).ok_or_else(|| {
+        format!(
+            "无法解析模型落点: {}",
+            truncate_text(&text, MAX_ERROR_TEXT_CHARS)
+        )
+    })?;
     if !candidates.contains(&chosen) {
         return Err(format!("模型返回了候选集外的落点: {chosen:?}"));
     }
@@ -458,6 +576,43 @@ pub(crate) async fn request_move(
         model,
         provider,
     })
+}
+
+pub(crate) fn build_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| format!("Cannot create OpenRouter client: {error}"))
+}
+
+async fn read_limited_body(mut response: reqwest::Response) -> Result<String, String> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("Cannot read OpenRouter response: {error}"))?
+    {
+        if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return Err(format!(
+                "OpenRouter response exceeds {MAX_RESPONSE_BYTES} bytes"
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    String::from_utf8(body).map_err(|error| format!("OpenRouter response is not UTF-8: {error}"))
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    format!(
+        "{}...",
+        text.chars()
+            .take(max_chars.saturating_sub(3))
+            .collect::<String>()
+    )
 }
 
 #[cfg(test)]
@@ -546,8 +701,20 @@ mod tests {
                 "model".into()
             )
             .err()
+            .map(|error| error.to_string())
             .as_deref(),
             Some("API URL must use HTTPS")
+        );
+        assert_eq!(
+            LlmConfig::new(
+                "key".into(),
+                "https://example.com/api/v1/chat/completions".into(),
+                "model".into()
+            )
+            .err()
+            .map(|error| error.to_string())
+            .as_deref(),
+            Some("API URL host must be openrouter.ai")
         );
         assert!(LlmConfig::new(
             "key".into(),
@@ -589,6 +756,15 @@ mod tests {
         assert!(current.exists());
         assert!(!legacy.exists());
         assert!(migrated_legacy_config_path(&legacy).exists());
+        #[cfg(unix)]
+        assert_eq!(
+            std::fs::metadata(migrated_legacy_config_path(&legacy))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
         let (migrated, repaired) = LlmConfig::read_from_path(&current).unwrap();
         assert_eq!(migrated.model(), "model");
         assert!(!repaired);
@@ -621,5 +797,71 @@ mod tests {
         assert!(!repaired);
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn spawn_http_server(status: &str, body: String) -> String {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let status = status.to_string();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 16 * 1024];
+            let _ = stream.read(&mut request);
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        });
+        format!("http://{address}/api/v1/chat/completions")
+    }
+
+    #[test]
+    fn rejects_an_oversized_api_response() {
+        let url = spawn_http_server("200 OK", "x".repeat(MAX_RESPONSE_BYTES + 1));
+        let config = LlmConfig::new_unchecked("key".into(), url, "model".into());
+        let client = build_client().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime
+            .block_on(request_move(
+                &client,
+                &config,
+                &[[Cell::Empty; BOARD]; BOARD],
+                &[(7, 7)],
+            ))
+            .unwrap_err();
+
+        assert!(error.contains("exceeds 65536 bytes"));
+    }
+
+    #[test]
+    fn reports_structured_http_api_errors() {
+        let url = spawn_http_server(
+            "429 Too Many Requests",
+            r#"{"error":{"message":"rate limited"}}"#.to_string(),
+        );
+        let config = LlmConfig::new_unchecked("key".into(), url, "model".into());
+        let client = build_client().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let error = runtime
+            .block_on(request_move(
+                &client,
+                &config,
+                &[[Cell::Empty; BOARD]; BOARD],
+                &[(7, 7)],
+            ))
+            .unwrap_err();
+
+        assert_eq!(error, "OpenRouter HTTP 429: rate limited");
     }
 }

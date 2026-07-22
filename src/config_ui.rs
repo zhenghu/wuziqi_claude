@@ -233,8 +233,9 @@ impl LlmConfigPage {
             Color::from_rgba(155, 170, 190, 255),
         );
         if !self.message.is_empty() {
+            let message = visible_head(&self.message, 70);
             draw_text(
-                &self.message,
+                &message,
                 100.0,
                 490.0,
                 16.0,
@@ -259,9 +260,9 @@ impl LlmConfigPage {
                         self.load_error = None;
                         return ConfigAction::Save(config);
                     }
-                    Err(error) => self.message = error,
+                    Err(error) => self.message = error.to_string(),
                 },
-                Err(error) => self.message = error,
+                Err(error) => self.message = error.to_string(),
             }
         }
         ConfigAction::None
@@ -294,6 +295,19 @@ fn visible_tail(value: &str, max_chars: usize) -> String {
         value
             .chars()
             .skip(count - max_chars + 3)
+            .collect::<String>()
+    )
+}
+
+fn visible_head(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    format!(
+        "{}...",
+        value
+            .chars()
+            .take(max_chars.saturating_sub(3))
             .collect::<String>()
     )
 }
@@ -366,6 +380,11 @@ mod tests {
     fn visible_tail_keeps_short_values_and_truncates_long_ones() {
         assert_eq!(visible_tail("short", 10), "short");
         assert_eq!(visible_tail("abcdefghijkl", 8), "...hijkl");
+    }
+
+    #[test]
+    fn visible_head_keeps_the_actionable_start_of_long_errors() {
+        assert_eq!(visible_head("abcdefghijkl", 8), "abcde...");
     }
 
     #[test]

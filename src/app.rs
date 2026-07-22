@@ -4,10 +4,10 @@ use crate::ai::{ai_move, llm_candidate_moves};
 use crate::board_view::{self, Button, TOP_BAR, WIN_H, WIN_W};
 use crate::config_ui::{ConfigAction, LlmConfigPage};
 use crate::game::{Cell, Game, Mode, Status};
-use crate::llm_ai::{config_exists, request_move, LlmConfig, LlmMove};
+use crate::llm_ai::{build_client, config_exists, request_move, LlmConfig, LlmMove};
 use macroquad::prelude::*;
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use tokio::sync::oneshot;
+use tokio::sync::mpsc as tokio_mpsc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AiAlgorithm {
@@ -17,14 +17,85 @@ enum AiAlgorithm {
 
 struct PendingLlmRequest {
     result: Receiver<Result<LlmMove, String>>,
-    cancel: Option<oneshot::Sender<()>>,
 }
 
-impl Drop for PendingLlmRequest {
-    fn drop(&mut self) {
-        if let Some(cancel) = self.cancel.take() {
-            let _ = cancel.send(());
-        }
+enum LlmCommand {
+    Request {
+        config: LlmConfig,
+        board: Box<[[Cell; crate::game::BOARD]; crate::game::BOARD]>,
+        candidates: Vec<(usize, usize)>,
+        result: mpsc::Sender<Result<LlmMove, String>>,
+    },
+    Cancel,
+}
+
+struct LlmWorker {
+    commands: tokio_mpsc::UnboundedSender<LlmCommand>,
+}
+
+impl LlmWorker {
+    fn new() -> Result<Self, String> {
+        let client = build_client()?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| format!("Cannot start LLM runtime: {error}"))?;
+        let (commands, mut receiver) = tokio_mpsc::unbounded_channel();
+        std::thread::Builder::new()
+            .name("wuziqi-llm".to_string())
+            .spawn(move || {
+                runtime.block_on(async move {
+                    let mut active: Option<tokio::task::JoinHandle<()>> = None;
+                    while let Some(command) = receiver.recv().await {
+                        if let Some(request) = active.take() {
+                            request.abort();
+                        }
+                        match command {
+                            LlmCommand::Request {
+                                config,
+                                board,
+                                candidates,
+                                result,
+                            } => {
+                                let client = client.clone();
+                                active = Some(tokio::spawn(async move {
+                                    let response =
+                                        request_move(&client, &config, &board, &candidates).await;
+                                    let _ = result.send(response);
+                                }));
+                            }
+                            LlmCommand::Cancel => {}
+                        }
+                    }
+                    if let Some(request) = active {
+                        request.abort();
+                    }
+                });
+            })
+            .map_err(|error| format!("Cannot start LLM worker: {error}"))?;
+        Ok(Self { commands })
+    }
+
+    fn request(
+        &self,
+        config: LlmConfig,
+        board: [[Cell; crate::game::BOARD]; crate::game::BOARD],
+        candidates: Vec<(usize, usize)>,
+    ) -> Result<Receiver<Result<LlmMove, String>>, String> {
+        let (result, receiver) = mpsc::channel();
+        self.commands
+            .send(LlmCommand::Request {
+                config,
+                board: Box::new(board),
+                candidates,
+                result,
+            })
+            .map_err(|_| "LLM worker has stopped".to_string())?;
+        Ok(receiver)
+    }
+
+    fn cancel(&self) {
+        let _ = self.commands.send(LlmCommand::Cancel);
     }
 }
 
@@ -33,6 +104,7 @@ pub(crate) struct App {
     ai_algorithm: AiAlgorithm,
     ai_thinking: bool,
     pending_llm: Option<PendingLlmRequest>,
+    llm_worker: Option<LlmWorker>,
     ai_notice: String,
     config_page: LlmConfigPage,
     active_llm_config: Option<LlmConfig>,
@@ -64,11 +136,19 @@ impl App {
         } else {
             "OpenRouter: not configured"
         };
+        let llm_worker = match LlmWorker::new() {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                eprintln!("LLM worker unavailable: {error}");
+                None
+            }
+        };
         Self {
             game: Game::new(Mode::HumanVsAi),
             ai_algorithm,
             ai_thinking: false,
             pending_llm: None,
+            llm_worker,
             ai_notice: String::new(),
             config_page: LlmConfigPage::new(active_llm_config.as_ref(), config_load_error),
             active_llm_config,
@@ -322,29 +402,19 @@ impl App {
         };
         let model = config.model().to_string();
         self.openrouter_status = "OpenRouter: connecting...".to_string();
-        let (result_sender, result_receiver) = mpsc::channel();
-        let (cancel_sender, cancel_receiver) = oneshot::channel();
-        std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build();
-            let result = match runtime {
-                Ok(runtime) => runtime.block_on(async {
-                    tokio::select! {
-                        _ = cancel_receiver => None,
-                        result = request_move(&config, &board, &candidates) => Some(result),
-                    }
-                }),
-                Err(error) => Some(Err(format!("Cannot start LLM runtime: {error}"))),
-            };
-            if let Some(result) = result {
-                let _ = result_sender.send(result);
+        let Some(worker) = &self.llm_worker else {
+            self.fallback_to_tactical("LLM worker unavailable; used fallback");
+            return;
+        };
+        let result = match worker.request(config, board, candidates) {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!("无法开始大模型请求: {error}");
+                self.fallback_to_tactical("LLM could not start; used fallback");
+                return;
             }
-        });
-        self.pending_llm = Some(PendingLlmRequest {
-            result: result_receiver,
-            cancel: Some(cancel_sender),
-        });
+        };
+        self.pending_llm = Some(PendingLlmRequest { result });
         eprintln!("正在请求大模型 {model} 选择落点……");
     }
 
@@ -387,8 +457,9 @@ impl App {
 
     fn cancel_ai(&mut self) {
         self.ai_thinking = false;
-        // Dropping the pending request sends its cancellation signal, causing
-        // tokio::select! to drop the in-flight HTTP future and close the connection.
+        if let Some(worker) = &self.llm_worker {
+            worker.cancel();
+        }
         self.pending_llm = None;
         self.ai_notice.clear();
     }
@@ -422,18 +493,41 @@ pub(crate) fn compact_text(value: &str, max_chars: usize) -> String {
 }
 
 #[cfg(test)]
-mod cancellation_tests {
+mod worker_tests {
     use super::*;
+    use std::io::Read;
+    use std::net::TcpListener;
+    use std::time::Duration;
 
     #[test]
-    fn dropping_a_pending_request_sends_cancellation() {
-        let (_result_sender, result) = mpsc::channel();
-        let (cancel, mut cancelled) = oneshot::channel();
-        drop(PendingLlmRequest {
-            result,
-            cancel: Some(cancel),
+    fn cancelling_the_worker_drops_the_in_flight_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = stream.read(&mut request);
+            std::thread::sleep(Duration::from_secs(2));
         });
+        let config = LlmConfig::new_unchecked(
+            "key".into(),
+            format!("http://{address}/api/v1/chat/completions"),
+            "model".into(),
+        );
+        let worker = LlmWorker::new().unwrap();
+        let result = worker
+            .request(
+                config,
+                [[Cell::Empty; crate::game::BOARD]; crate::game::BOARD],
+                vec![(7, 7)],
+            )
+            .unwrap();
 
-        assert_eq!(cancelled.try_recv(), Ok(()));
+        worker.cancel();
+
+        assert!(matches!(
+            result.recv_timeout(Duration::from_secs(1)),
+            Err(mpsc::RecvTimeoutError::Disconnected)
+        ));
     }
 }
