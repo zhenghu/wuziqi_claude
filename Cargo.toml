@@ -2,6 +2,11 @@
 name = "wuziqi"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.87"
+description = "A native and web Gomoku game with tactical-search and optional OpenRouter AI"
+repository = "https://github.com/zhenghu/wuziqi_codex"
+readme = "README.md"
+publish = false
 
 [dependencies]
 macroquad = "0.4"

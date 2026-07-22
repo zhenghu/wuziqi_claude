@@ -1,4 +1,4 @@
-# wuziqi_claude — 五子棋 (Gomoku)
+# wuziqi_codex — 五子棋 (Gomoku)
 
 用 Rust + [macroquad](https://github.com/not-fl3/macroquad) 编写的五子棋小游戏,支持人机对战和双人对战。附带一个逻辑完全一致的网页移植版,无需安装任何东西即可游玩。
 
@@ -23,7 +23,7 @@ cargo run --release
 
 ### 大模型 AI（原生版）
 
-大模型模式使用 OpenRouter Chat Completions API。点击顶部 `Config (C)` 或按 `C` 打开配置页面，可填写 OpenRouter API Key、模型名称和 API 地址。配置保存在系统用户配置目录，并在 macOS/Linux 上设置为仅当前用户可读写。
+大模型模式使用 OpenRouter Chat Completions API。点击顶部 `Config (C)` 或按 `C` 打开配置页面，可填写 OpenRouter API Key 和模型名称；为防止密钥被发送到第三方服务器，API 地址仅接受 OpenRouter 官方 HTTPS 端点。配置保存在系统用户配置目录，并在 macOS/Linux 上设置为仅当前用户可读写。
 
 macOS 配置路径为 `~/Library/Application Support/Wuziqi/llm_config.json`。旧版项目目录中的 `llm_config.json` 会在首次启动时自动迁移到新位置，并归档为 `llm_config.json.migrated`，避免误删原文件。也可以复制示例文件后直接编辑 JSON：
 
