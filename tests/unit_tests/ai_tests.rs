@@ -49,6 +49,14 @@ fn point_score_sums_patterns_across_axes() {
 }
 
 #[test]
+fn point_score_recognizes_a_broken_four() {
+    let mut board = empty_board();
+    put(&mut board, &[(4, 7), (5, 7), (8, 7)], Cell::White);
+
+    assert!(point_score(&board, 7, 7, Cell::White) >= 110_000);
+}
+
+#[test]
 fn near_stone_uses_a_two_cell_square_radius() {
     let mut board = empty_board();
     assert!(!near_stone(&board, 7, 7));

@@ -1,10 +1,14 @@
 //! 五子棋的落点评分、战术识别与限宽搜索。
 
 use crate::game::{in_board, opponent, winning_line, Cell, BOARD, CENTER, DIRECTIONS};
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 const ROOT_CANDIDATE_LIMIT: usize = 12;
-const REPLY_CANDIDATE_LIMIT: usize = 10;
 const MATE_SCORE: i64 = 1_000_000_000_000;
+const MAX_SEARCH_DEPTH: u8 = 4;
+const SEARCH_NODE_BUDGET: usize = 100;
+const SEARCH_SAFETY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 在 (x,y) 为 p 落子后, 单方向的 (连子数, 开放端数)
 pub(crate) fn line_stat(
@@ -50,9 +54,52 @@ pub(crate) fn point_score(board: &[[Cell; BOARD]; BOARD], x: usize, y: usize, p:
     let mut total = 0i64;
     for (dx, dy) in DIRECTIONS {
         let (count, open) = line_stat(board, x, y, dx, dy, p);
-        total += pattern_score(count, open);
+        total += pattern_score(count, open) + broken_pattern_score(board, x, y, dx, dy, p);
     }
     total
+}
+
+/// 补充连续计数无法识别的跳四、跳三等带内部空点棋形。
+fn broken_pattern_score(
+    board: &[[Cell; BOARD]; BOARD],
+    x: usize,
+    y: usize,
+    dx: i32,
+    dy: i32,
+    p: Cell,
+) -> i64 {
+    let mut line = String::with_capacity(9);
+    for offset in -4i32..=4 {
+        let (cx, cy) = (x as i32 + dx * offset, y as i32 + dy * offset);
+        let symbol = if offset == 0 {
+            'X'
+        } else if !in_board(cx, cy) {
+            'O'
+        } else {
+            match board[cy as usize][cx as usize] {
+                cell if cell == p => 'X',
+                Cell::Empty => '.',
+                _ => 'O',
+            }
+        };
+        line.push(symbol);
+    }
+
+    if ["XXX.X", "XX.XX", "X.XXX"]
+        .iter()
+        .any(|pattern| line.contains(pattern))
+    {
+        110_000
+    } else if [".XX.X.", ".X.XX."]
+        .iter()
+        .any(|pattern| line.contains(pattern))
+    {
+        35_000
+    } else if line.contains(".X.X.X.") {
+        12_000
+    } else {
+        0
+    }
 }
 
 /// 只考虑已有棋子周围 2 格内的空位
@@ -192,70 +239,214 @@ fn evaluate_position(board: &[[Cell; BOARD]; BOARD], ai: Cell) -> i64 {
     threat_value(board, ai) * 10 - threat_value(board, opponent(ai)) * 9
 }
 
-/// 玩家回应后轮到 AI：识别下一手必胜/必败，否则做静态威胁评估。
-fn leaf_score(board: &[[Cell; BOARD]; BOARD], ai: Cell) -> i64 {
-    let ai_wins = immediate_winning_moves(board, ai);
-    if !ai_wins.is_empty() {
-        return MATE_SCORE;
-    }
-
-    let human = opponent(ai);
-    let human_wins = immediate_winning_moves(board, human);
-    if human_wins.len() >= 2 {
-        return -MATE_SCORE;
-    }
-    if let Some(&(x, y)) = human_wins.first() {
-        // 唯一直接威胁可以被 AI 下一手强制挡住，延伸这一手再评估。
-        let mut forced = *board;
-        forced[y][x] = ai;
-        return evaluate_position(&forced, ai);
-    }
-    evaluate_position(board, ai)
+#[derive(Clone, Copy)]
+struct CachedScore {
+    depth: u8,
+    score: i64,
 }
 
-/// 在给定 AI 根着后，计算玩家最佳回应（极小层）。
-fn reply_score(
-    board: &[[Cell; BOARD]; BOARD],
-    ai: Cell,
-    alpha: i64,
-    human_forks: &[(usize, usize)],
-) -> i64 {
-    let human = opponent(ai);
-    if !immediate_winning_moves(board, human).is_empty() {
-        return -MATE_SCORE;
+struct SearchContext {
+    deadline: Instant,
+    nodes_remaining: usize,
+    table: HashMap<u64, CachedScore>,
+}
+
+impl SearchContext {
+    fn new(node_budget: usize, safety_timeout: Duration) -> Self {
+        Self {
+            deadline: Instant::now() + safety_timeout,
+            nodes_remaining: node_budget,
+            table: HashMap::new(),
+        }
     }
 
-    let ai_wins = immediate_winning_moves(board, ai);
-    if ai_wins.len() >= 2 {
-        return MATE_SCORE;
+    fn enter_node(&mut self) -> bool {
+        if self.nodes_remaining == 0 || Instant::now() >= self.deadline {
+            return false;
+        }
+        self.nodes_remaining -= 1;
+        true
     }
+}
 
-    let replies = if ai_wins.len() == 1 {
-        // 玩家必须占据 AI 唯一的下一手获胜点。
-        ai_wins
-    } else {
-        // AI 新增的棋子只会消除既有玩家双杀，不会创造新的玩家双杀。
-        ranked_moves(board, human, REPLY_CANDIDATE_LIMIT, human_forks)
+fn board_hash(board: &[[Cell; BOARD]; BOARD], to_move: Cell) -> u64 {
+    let mut hash = match to_move {
+        Cell::Black => 0x9e37_79b9_7f4a_7c15,
+        Cell::White => 0xc2b2_ae3d_27d4_eb4f,
+        Cell::Empty => 0,
     };
-    if replies.is_empty() {
-        return evaluate_position(board, ai);
+    for (index, cell) in board.iter().flatten().enumerate() {
+        let value = match cell {
+            Cell::Black => (index as u64) * 2 + 1,
+            Cell::White => (index as u64) * 2 + 2,
+            Cell::Empty => continue,
+        };
+        hash ^= mix_hash(value);
+    }
+    hash
+}
+
+fn mix_hash(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn occupied_count(board: &[[Cell; BOARD]; BOARD]) -> usize {
+    board
+        .iter()
+        .flatten()
+        .filter(|&&cell| cell != Cell::Empty)
+        .count()
+}
+
+fn candidate_limit(board: &[[Cell; BOARD]; BOARD], depth: u8) -> usize {
+    let base: usize = match occupied_count(board) {
+        0..=8 => 10,
+        9..=30 => 14,
+        _ => 18,
+    };
+    base.saturating_sub(depth.saturating_sub(1) as usize * 2)
+        .max(6)
+}
+
+fn search_moves(board: &[[Cell; BOARD]; BOARD], p: Cell, depth: u8) -> Vec<(usize, usize)> {
+    let wins = immediate_winning_moves(board, p);
+    if !wins.is_empty() {
+        return ranked_moves(board, p, 0, &wins);
+    }
+    let opponent_wins = immediate_winning_moves(board, opponent(p));
+    if !opponent_wins.is_empty() {
+        return ranked_moves(board, p, 0, &opponent_wins);
+    }
+    let forks = double_threat_moves(board, p);
+    if !forks.is_empty() {
+        return ranked_moves(board, p, 0, &forks);
+    }
+    let opponent_forks = double_threat_moves(board, opponent(p));
+    ranked_moves(board, p, candidate_limit(board, depth), &opponent_forks)
+}
+
+fn minimax(
+    board: &[[Cell; BOARD]; BOARD],
+    to_move: Cell,
+    ai: Cell,
+    depth: u8,
+    mut alpha: i64,
+    mut beta: i64,
+    context: &mut SearchContext,
+) -> Option<i64> {
+    if !context.enter_node() {
+        return None;
     }
 
-    let mut worst = MATE_SCORE * 2;
-    for (x, y) in replies {
-        let mut next = *board;
-        next[y][x] = human;
-        let score = if winning_line(&next, x, y).is_some() {
-            -MATE_SCORE
+    let key = board_hash(board, to_move);
+    if let Some(cached) = context.table.get(&key) {
+        if cached.depth == depth {
+            return Some(cached.score);
+        }
+    }
+
+    let wins = immediate_winning_moves(board, to_move);
+    if !wins.is_empty() {
+        let score = if to_move == ai {
+            MATE_SCORE + depth as i64
         } else {
-            leaf_score(&next, ai)
+            -MATE_SCORE - depth as i64
         };
-        worst = worst.min(score);
-        if worst <= alpha {
+        return Some(score);
+    }
+    if depth == 0 {
+        return Some(evaluate_position(board, ai));
+    }
+
+    let moves = search_moves(board, to_move, depth);
+    if moves.is_empty() {
+        return Some(evaluate_position(board, ai));
+    }
+
+    let maximizing = to_move == ai;
+    let mut best = if maximizing {
+        -MATE_SCORE * 2
+    } else {
+        MATE_SCORE * 2
+    };
+    let mut cutoff = false;
+    for (x, y) in moves {
+        let mut next = *board;
+        next[y][x] = to_move;
+        let score = if winning_line(&next, x, y).is_some() {
+            if maximizing {
+                MATE_SCORE + depth as i64
+            } else {
+                -MATE_SCORE - depth as i64
+            }
+        } else {
+            minimax(
+                &next,
+                opponent(to_move),
+                ai,
+                depth - 1,
+                alpha,
+                beta,
+                context,
+            )?
+        };
+
+        if maximizing {
+            best = best.max(score);
+            alpha = alpha.max(best);
+        } else {
+            best = best.min(score);
+            beta = beta.min(best);
+        }
+        if alpha >= beta {
+            cutoff = true;
             break;
         }
     }
-    worst
+
+    if !cutoff {
+        context
+            .table
+            .insert(key, CachedScore { depth, score: best });
+    }
+    Some(best)
+}
+
+fn search_root(
+    board: &[[Cell; BOARD]; BOARD],
+    ai: Cell,
+    roots: &[(usize, usize)],
+    depth: u8,
+    context: &mut SearchContext,
+) -> Option<((usize, usize), i64)> {
+    let mut best = *roots.first()?;
+    let mut best_score = -MATE_SCORE * 2;
+    let mut alpha = -MATE_SCORE * 2;
+    for &(x, y) in roots {
+        if !context.enter_node() {
+            return None;
+        }
+        let mut next = *board;
+        next[y][x] = ai;
+        let score = minimax(
+            &next,
+            opponent(ai),
+            ai,
+            depth.saturating_sub(1),
+            alpha,
+            MATE_SCORE * 2,
+            context,
+        )?;
+        if score > best_score {
+            best = (x, y);
+            best_score = score;
+        }
+        alpha = alpha.max(best_score);
+    }
+    Some((best, best_score))
 }
 
 pub(crate) fn ai_move(
@@ -292,19 +483,22 @@ pub(crate) fn ai_move(
     if human_forks.len() == 1 {
         return human_forks[0];
     }
-    let roots = ranked_moves(board, ai, ROOT_CANDIDATE_LIMIT, &human_forks);
+    let roots = ranked_moves(
+        board,
+        ai,
+        candidate_limit(board, 1).max(ROOT_CANDIDATE_LIMIT),
+        &human_forks,
+    );
     let Some(&mut_best) = roots.first() else {
         return (CENTER, CENTER);
     };
     let mut best = mut_best;
-    let mut best_score = -MATE_SCORE * 2;
-    for (x, y) in roots {
-        let mut next = *board;
-        next[y][x] = ai;
-        let score = reply_score(&next, ai, best_score, &human_forks);
-        if score > best_score {
-            best_score = score;
-            best = (x, y);
+    let mut context = SearchContext::new(SEARCH_NODE_BUDGET, SEARCH_SAFETY_TIMEOUT);
+    for depth in 2..=MAX_SEARCH_DEPTH {
+        if let Some((completed_best, _)) = search_root(board, ai, &roots, depth, &mut context) {
+            best = completed_best;
+        } else {
+            break;
         }
     }
     best
@@ -337,5 +531,59 @@ pub(crate) fn llm_candidate_moves(
     if human_forks.len() == 1 {
         return human_forks;
     }
-    ranked_moves(board, ai, ROOT_CANDIDATE_LIMIT, &human_forks)
+    ranked_moves(
+        board,
+        ai,
+        candidate_limit(board, 1).max(ROOT_CANDIDATE_LIMIT),
+        &human_forks,
+    )
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn board_hash_includes_stones_and_side_to_move() {
+        let mut board = [[Cell::Empty; BOARD]; BOARD];
+        let empty_black = board_hash(&board, Cell::Black);
+        assert_ne!(empty_black, board_hash(&board, Cell::White));
+
+        board[CENTER][CENTER] = Cell::Black;
+        assert_ne!(empty_black, board_hash(&board, Cell::Black));
+    }
+
+    #[test]
+    fn candidate_width_grows_with_game_phase_and_narrows_with_depth() {
+        let mut board = [[Cell::Empty; BOARD]; BOARD];
+        assert_eq!(candidate_limit(&board, 1), 10);
+
+        for index in 0..9 {
+            board[index / BOARD][index % BOARD] = Cell::Black;
+        }
+        assert_eq!(candidate_limit(&board, 1), 14);
+        assert_eq!(candidate_limit(&board, 4), 8);
+
+        for index in 9..31 {
+            board[index / BOARD][index % BOARD] = Cell::White;
+        }
+        assert_eq!(candidate_limit(&board, 1), 18);
+    }
+
+    #[test]
+    fn exhausted_search_returns_without_using_a_partial_iteration() {
+        let board = [[Cell::Empty; BOARD]; BOARD];
+        let mut context = SearchContext::new(0, SEARCH_SAFETY_TIMEOUT);
+
+        assert!(minimax(
+            &board,
+            Cell::Black,
+            Cell::Black,
+            4,
+            -MATE_SCORE * 2,
+            MATE_SCORE * 2,
+            &mut context,
+        )
+        .is_none());
+    }
 }
