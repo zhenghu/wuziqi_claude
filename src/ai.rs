@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 const ROOT_CANDIDATE_LIMIT: usize = 12;
 const MATE_SCORE: i64 = 1_000_000_000_000;
 const MAX_SEARCH_DEPTH: u8 = 4;
-const SEARCH_BUDGET: Duration = Duration::from_millis(120);
+const SEARCH_NODE_BUDGET: usize = 100;
+const SEARCH_SAFETY_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 在 (x,y) 为 p 落子后, 单方向的 (连子数, 开放端数)
 pub(crate) fn line_stat(
@@ -246,19 +247,25 @@ struct CachedScore {
 
 struct SearchContext {
     deadline: Instant,
+    nodes_remaining: usize,
     table: HashMap<u64, CachedScore>,
 }
 
 impl SearchContext {
-    fn new(budget: Duration) -> Self {
+    fn new(node_budget: usize, safety_timeout: Duration) -> Self {
         Self {
-            deadline: Instant::now() + budget,
+            deadline: Instant::now() + safety_timeout,
+            nodes_remaining: node_budget,
             table: HashMap::new(),
         }
     }
 
-    fn has_time(&self) -> bool {
-        Instant::now() < self.deadline
+    fn enter_node(&mut self) -> bool {
+        if self.nodes_remaining == 0 || Instant::now() >= self.deadline {
+            return false;
+        }
+        self.nodes_remaining -= 1;
+        true
     }
 }
 
@@ -330,7 +337,7 @@ fn minimax(
     mut beta: i64,
     context: &mut SearchContext,
 ) -> Option<i64> {
-    if !context.has_time() {
+    if !context.enter_node() {
         return None;
     }
 
@@ -367,9 +374,6 @@ fn minimax(
     };
     let mut cutoff = false;
     for (x, y) in moves {
-        if !context.has_time() {
-            return None;
-        }
         let mut next = *board;
         next[y][x] = to_move;
         let score = if winning_line(&next, x, y).is_some() {
@@ -422,7 +426,7 @@ fn search_root(
     let mut best_score = -MATE_SCORE * 2;
     let mut alpha = -MATE_SCORE * 2;
     for &(x, y) in roots {
-        if !context.has_time() {
+        if !context.enter_node() {
             return None;
         }
         let mut next = *board;
@@ -489,7 +493,7 @@ pub(crate) fn ai_move(
         return (CENTER, CENTER);
     };
     let mut best = mut_best;
-    let mut context = SearchContext::new(SEARCH_BUDGET);
+    let mut context = SearchContext::new(SEARCH_NODE_BUDGET, SEARCH_SAFETY_TIMEOUT);
     for depth in 2..=MAX_SEARCH_DEPTH {
         if let Some((completed_best, _)) = search_root(board, ai, &roots, depth, &mut context) {
             best = completed_best;
@@ -567,9 +571,9 @@ mod search_tests {
     }
 
     #[test]
-    fn expired_search_returns_without_using_a_partial_iteration() {
+    fn exhausted_search_returns_without_using_a_partial_iteration() {
         let board = [[Cell::Empty; BOARD]; BOARD];
-        let mut context = SearchContext::new(Duration::ZERO);
+        let mut context = SearchContext::new(0, SEARCH_SAFETY_TIMEOUT);
 
         assert!(minimax(
             &board,
